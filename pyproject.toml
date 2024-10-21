@@ -106,6 +106,14 @@ repository = "https://github.com/Future-House/paper-qa"
 [tool.black]
 preview = true
 
+[tool.codeflash]
+disable-imports-sorting = true
+disable-telemetry = true
+formatter-cmds = ["uv tool run ruff check --exit-zero --fix $file", "uv tool run ruff format $file"]
+module-root = "paperqa"
+test-framework = "pytest"
+tests-root = "tests"
+
 [tool.codespell]
 check-filenames = true
 check-hidden = true
