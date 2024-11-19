@@ -155,24 +155,12 @@ class PaperQAEnvironment(Environment[EnvironmentState]):
     def export_frame(self) -> Frame:
         return Frame(state=self.state, info={"query": self._query})
 
-    def _has_excess_answer_failures(self) -> bool:
-        if self._query.settings.answer.max_answer_attempts is None:
-            return False
-        return (
-            sum(
-                tn == GenerateAnswer.gen_answer.__name__
-                for s in self.state.tool_history
-                for tn in s
-            )
-            > self._query.settings.answer.max_answer_attempts
-        )
-
     USE_POST_PROCESSED_REWARD: ClassVar[float] = 0.0
 
     async def step(
         self, action: ToolRequestMessage
     ) -> tuple[Messages, float, bool, bool]:
-        self.state.record_action(action)
+        self.state.session.add_tokens(action)  # Add usage for action if present
 
         response_messages = cast(
             list[Message],
@@ -190,8 +178,7 @@ class PaperQAEnvironment(Environment[EnvironmentState]):
                 isinstance(msg, ToolResponseMessage)
                 and msg.name == Complete.complete.__name__
                 for msg in response_messages
-            )
-            or self._has_excess_answer_failures(),
+            ),
             False,  # Let caller determine truncations
         )
 
