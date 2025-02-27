@@ -25,8 +25,8 @@ dependencies = [
     "PyMuPDF>=1.24.12",  # For pymupdf.set_messages addition
     "aiohttp>=3.10.6",  # TODO: remove in favor of httpx, pin for aiohttp.ClientConnectionResetError
     "anyio",
-    "fh-llm-client>=0.0.9",  # Pin for CommonLLMNames
-    "fhaviary[llm]>=0.14",  # For MultipleChoiceQuestion
+    "fhaviary[llm]>=0.18.2",  # For FunctionInfo.parameters.get_properties()
+    "fhlmi",  # For new LLM client interface
     "html2text",  # TODO: evaluate moving to an opt-in dependency
     "httpx",
     "numpy",
@@ -53,13 +53,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 
 [project.optional-dependencies]
-datasets = [
-    "datasets",
-]
 dev = [
     "ipython>=8",  # Pin to keep recent
     "mypy>=1.8",  # Pin for mutable-override
-    "paper-qa[datasets,ldp,typing,zotero,local,qdrant]",
+    "paper-qa[ldp,typing,zotero,local,qdrant]",
     "pre-commit>=3.4",  # Pin to keep recent
     "pydantic~=2.0",
     "pylint-pydantic",
@@ -77,16 +74,18 @@ dev = [
     "vcrpy>=6",  # Pin for https://github.com/kevin1024/vcrpy/issues/884
 ]
 ldp = [
-    "ldp>=0.17",  # For evaluate_consensus
+    "ldp>=0.25.0",  # For new LLM client interface
 ]
 local = [
     "sentence-transformers",
+]
+openreview = [
+    "openreview-py",
 ]
 qdrant = [
     "qdrant-client",
 ]
 typing = [
-    "pandas-stubs",
     "types-PyYAML",
     "types-setuptools",
 ]
@@ -168,7 +167,7 @@ warn_unused_ignores = true
 ignore_missing_imports = true
 # Per-module configuration options
 module = [
-    "datasets",  # SEE: https://github.com/huggingface/datasets/issues/3841
+    "openreview",
     "pybtex.*",  # SEE: https://bitbucket.org/pybtex-devs/pybtex/issues/141/type-annotations
     "pymupdf",  # SEE: https://github.com/pymupdf/PyMuPDF/issues/2883
     "pyzotero",  # SEE: https://github.com/urschrei/pyzotero/issues/110
@@ -231,6 +230,7 @@ disable = [
     "too-many-lines",  # Don't care to enforce this
     "too-many-locals",  # Rely on ruff PLR0914 for this
     "too-many-positional-arguments",  # Don't care to enforce this
+    "too-many-public-methods",  # Rely on ruff PLR0904 for this
     "too-many-return-statements",  # Rely on ruff PLR0911 for this
     "too-many-statements",  # Rely on ruff PLR0915 for this
     "undefined-loop-variable",  # Don't care to enforce this

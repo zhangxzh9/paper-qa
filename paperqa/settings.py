@@ -9,8 +9,8 @@ from pydoc import locate
 from typing import Any, ClassVar, Self, TypeAlias, assert_never, cast
 
 import anyio
-from aviary.core import ToolSelector
-from llmclient import (
+from aviary.core import Tool, ToolSelector
+from lmi import (
     CommonLLMNames,
     EmbeddingModel,
     LiteLLMModel,
@@ -408,6 +408,11 @@ class IndexSettings(BaseModel):
         default=5,  # low default for folks without S2/Crossref keys
         description="Number of concurrent filesystem reads for indexing",
     )
+    batch_size: int = Field(
+        default=1,
+        ge=1,
+        description="Number of files to process before committing to the index.",
+    )
     sync_with_paper_directory: bool = Field(
         default=True,
         description=(
@@ -445,7 +450,7 @@ class AgentSettings(BaseModel):
 
     agent_llm: str = Field(
         default=CommonLLMNames.GPT_4O.value,
-        description="Model to use for agent.",
+        description="Model to use for agent making tool selections.",
     )
 
     agent_llm_config: dict | None = Field(
@@ -484,8 +489,9 @@ class AgentSettings(BaseModel):
     agent_evidence_n: int = Field(
         default=1,
         ge=1,
-        description="Top n ranked evidences shown to the "
-        "agent after the GatherEvidence tool.",
+        description=(
+            "Top n ranked evidences shown to the agent after the GatherEvidence tool."
+        ),
     )
     timeout: float = Field(
         default=500.0,
@@ -521,6 +527,14 @@ class AgentSettings(BaseModel):
         frozen=True,
     )
     index: IndexSettings = Field(default_factory=IndexSettings)
+
+    rebuild_index: bool = Field(
+        default=True,
+        description=(
+            "Flag to rebuild the index at the start of agent runners, default is True"
+            " for CLI users to ensure all source PDFs are pulled in."
+        ),
+    )
 
     callbacks: Mapping[str, Sequence[Callable[[_EnvironmentState], Any]]] = Field(
         default_factory=dict,
@@ -589,12 +603,13 @@ def make_default_litellm_model_list_settings(
 ) -> dict:
     """Settings matching "model_list" schema here: https://docs.litellm.ai/docs/routing."""
     return {
+        "name": llm,
         "model_list": [
             {
                 "model_name": llm,
                 "litellm_params": {"model": llm, "temperature": temperature},
             }
-        ]
+        ],
     }
 
 
@@ -902,12 +917,12 @@ class Settings(BaseSettings):
                     )
                 )
             return agent_cls(
-                llm_model={"model": agent_llm, "temperature": self.temperature},
+                llm_model={"name": agent_llm, "temperature": self.temperature},
                 **config,
             )
         if issubclass(agent_cls, SimpleAgent):
             return agent_cls(
-                llm_model={"model": agent_llm, "temperature": self.temperature},
+                llm_model={"name": agent_llm, "temperature": self.temperature},
                 sys_prompt=agent_settings.agent_system_prompt,
                 **config,
             )
@@ -917,6 +932,14 @@ class Settings(BaseSettings):
                 agent_state_type=SimpleAgentState, **config
             )
         raise NotImplementedError(f"Didn't yet handle agent type {agent_type}.")
+
+    def adjust_tools_for_agent_llm(self, tools: list[Tool]) -> None:
+        # Google gemini/gemini-1.5-flash fails to support empty dict properties
+        # SEE: https://github.com/BerriAI/litellm/issues/7634
+        if "gemini" in self.agent.agent_llm.lower():
+            for t in tools:
+                if not t.info.get_properties():
+                    t.info.parameters = None
 
 
 # Settings: already Settings
