@@ -18,6 +18,8 @@ from .main import agent_query, index_search
 from .models import AnswerResponse
 from .search import SearchIndex, get_directory_index
 
+from datetime import datetime
+
 logger = logging.getLogger(__name__)
 
 LOG_VERBOSITY_MAP: dict[int, dict[str, int]] = {
@@ -75,6 +77,15 @@ def set_up_rich_handler(install: bool = True) -> RichHandler:
         isinstance(h, RichHandler) for h in _PAPERQA_PKG_ROOT_LOGGER.handlers
     ):
         _PAPERQA_PKG_ROOT_LOGGER.addHandler(rich_handler)
+
+    # 添加 FileHandler
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = f"log/log_{current_time}.log"
+    file_handler = logging.FileHandler(log_filename)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    _PAPERQA_PKG_ROOT_LOGGER.addHandler(file_handler)
+
     return rich_handler
 
 

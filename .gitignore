@@ -308,3 +308,10 @@ tests/example2.*
 
 # Client data
 paperqa/clients/client_data/retractions.csv
+
+
+/log/*
+/doctor_advice/*
+/my_papers_bak/*
+/my_papers/*
+/.pqa/*
