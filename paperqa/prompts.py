@@ -1,5 +1,7 @@
 from datetime import datetime
 
+# ruff: noqa: E501
+
 summary_prompt = (
     "Summarize the excerpt below to help answer a question.\n\nExcerpt from"
     " {citation}\n\n----\n\n{text}\n\n----\n\nQuestion: {question}\n\nDo not directly"
@@ -19,6 +21,29 @@ summary_json_prompt = (
 # 1. Lead to complete tool being called with has_successful_answer=False
 # 2. Can be used for unit testing
 CANNOT_ANSWER_PHRASE = "I cannot answer"
+
+answer_iteration_prompt_template = (
+    "You are iterating on a prior answer, with a potentially different context:\n\n"
+    "{prior_answer}\n\n"
+    "Create a new answer only using keys and data from the included context."
+    " You can not use context keys from the prior answer which are not "
+    "also included in the above context.\n\n"
+)
+
+CITATION_KEY_CONSTRAINTS = (
+    "## Valid citation examples: \n"
+    "- Example2024Example pages 3-4 \n"
+    "- Example2024 pages 3-4 \n"
+    "- Example2024 pages 3-4, Example2024 pages 5-6 \n"
+    "## Invalid citation examples: \n"
+    "- Example2024Example pages 3-4 and pages 4-5 \n"
+    "- Example2024Example (pages 3-4) \n"
+    "- Example2024Example pages 3-4, pages 5-6 \n"
+    "- Example2024Example et al. (2024) \n"
+    "- Example's work (pages 17–19) \n"  # noqa: RUF001
+    "- (pages 17–19) \n"  # noqa: RUF001
+)
+
 qa_prompt = (
     "Answer the question below with the context.\n\n"
     "Context (with relevance scores):\n\n{context}\n\n----\n\n"
@@ -27,14 +52,16 @@ qa_prompt = (
     "If the context provides insufficient information reply "
     f'"{CANNOT_ANSWER_PHRASE}." '
     "For each part of your answer, indicate which sources most support "
-    "it via citation keys at the end of sentences, "
-    "like {example_citation}. Only cite from the context "
-    "below and only use the valid keys. Write in the style of a "
-    "Wikipedia article, with concise sentences and coherent paragraphs. "
-    "The context comes from a variety of sources and is only a summary, "
-    "so there may inaccuracies or ambiguities. If quotes are present and "
-    "relevant, use them in the answer. This answer will go directly onto "
-    "Wikipedia, so do not add any extraneous information.\n\n"
+    "it via citation keys at the end of sentences, like {example_citation}. "
+    "Only cite from the context above and only use the citation keys from the context. "
+    f"{CITATION_KEY_CONSTRAINTS}"
+    "Do not concatenate citation keys, just use them as is. "
+    "Write in the style of a Wikipedia article, with concise sentences and "
+    "coherent paragraphs. The context comes from a variety of sources and is "
+    "only a summary, so there may inaccuracies or ambiguities. If quotes are "
+    "present and relevant, use them in the answer. This answer will go directly "
+    "onto Wikipedia, so do not add any extraneous information.\n\n"
+    "{prior_answer_prompt}"
     "Answer ({answer_length}):"
 )
 
@@ -82,7 +109,7 @@ Provide a summary of the relevant information that could help answer the questio
 }}
 
 where `summary` is relevant information from the text - {summary_length} words. `relevance_score` is an integer 1-10 for the relevance of `summary` to the question.
-"""  # noqa: E501
+"""
 
 env_system_prompt = (
     # Matching https://github.com/langchain-ai/langchain/blob/langchain%3D%3D0.2.3/libs/langchain/langchain/agents/openai_functions_agent/base.py#L213-L215
@@ -113,100 +140,3 @@ EVAL_PROMPT_TEMPLATE = (
 CONTEXT_OUTER_PROMPT = "{context_str}\n\nValid Keys: {valid_keys}"
 CONTEXT_INNER_PROMPT_NOT_DETAILED = "{name}: {text}"
 CONTEXT_INNER_PROMPT = f"{CONTEXT_INNER_PROMPT_NOT_DETAILED}\nFrom {{citation}}"
-
-
-# Prompts for LFRQA
-lfrqa_system_prompt = (
-    # From RAG-QA Arena (https://arxiv.org/pdf/2407.13998) Table 13 and 15
-    "Pairwise Evaluation: Instruction and Rubric\n"
-    "We will show you a query and a pair of answers to the query. "
-    "You need to provide your preference over this pair of answers.\n"
-    "First, try your best to determine whether the information in an answer can help "
-    "truthfully answer the query. Then rate your preference based on Helpfulness and "
-    "Truthfulness.\n"
-    "- Helpfulness: information that is helpful/relevant to answer the query. An ideal "
-    "answer consists of only information that is helpful/relevant to answer the query.\n"
-    "- Truthfulness: information that you believe is correct to answer the query. By our "
-    "definition, truthful information should be helpful information. If you find it "
-    "difficult to determine the truthfulness of some information, consider it untruthful. "
-    "Often time, this is due to not enough context provided in the answer. Another source "
-    "of untruthfulness is when conflicting information is presented, and the answer does "
-    "not reconcile them in a coherent way.\n"
-    "<rubric>\n"
-    "Here is how you judge (in the order of importance):\n"
-    "- If one answer has all truthful information while the other has some untruthful "
-    "information, prefer the all-truthful one.\n"
-    "- If both have some untruthful information, prefer the one with less untruthful "
-    "information.\n"
-    "- If both have all truthful information, prefer the one with more truthful or helpful "
-    "information.\n"
-    "- If two answers look equally good, or it is too hard to judge using the three cases "
-    "above, then you are 'not sure' which one is better.\n"
-    "</rubric>\n\n"
-    "Label 1\n"
-    "Query\n"
-    "difference between 'publicly' and 'publically'.\n"
-    "<query> difference between 'publicly' and 'publically'. </query>\n"
-    "<answer 1> Both 'publicly' and 'publically' bear no difference in meaning, as they are "
-    "essentially alternative spellings of the same concept. Publicly is more widely used, "
-    "but the existence of 'publically' in reputable sources like the OED means it cannot be "
-    "dismissed as simply incorrect. Some opinions hold that 'publicly' is the older irregular "
-    "form, still preached by a lot of grammars, and 'publically,' on the other hand, is the "
-    "newer and regular form. </answer 1>\n"
-    "<answer 2> There is no difference in meaning between 'publicly' and 'publically'; they "
-    "are alternative spellings of the same word. </answer 2>\n"
-    "Both <answer 1> and <answer 2> are truthful. However, <answer 1> provides more truthful "
-    "information as the context to compare the two terms. Therefore, <answer 1> is better.\n\n"
-    "Label 2\n"
-    "Query\n"
-    "what did European/American historical cooks do with the egg whites?\n"
-    "<query> what did European/American historical cooks do with the egg whites? </query>\n"
-    "<answer 1> Historical European and American cooks used egg whites for making egg white "
-    "omelettes and egg white pasta, as well as for stiffening clothing, similar to how starch "
-    "is used today. Egg whites have found their place in various non-culinary applications "
-    "throughout history, such as in the clarification of beer and wine, in the conservation of "
-    "books through bookbinding and gilding, and in makeup as an ancient form of nail polish. "
-    "</answer 1>\n"
-    "<answer 2> They were also utilized historically as a stiffening agent for clothing, similar "
-    "to how starch is used today. The culinary landscape was not left untouched, with egg whites "
-    "making their way into recipes for omelettes and pastas as early as the 15th century. "
-    "</answer 2>\n"
-    "Both <answer 1> and <answer 2> provide several usages of egg whites for European/American "
-    "cooks.\n"
-    "<answer 2> clearly provides more options with fully explained details. Therefore, <answer 2> "
-    "is better.\n\n"
-    "Label 0\n"
-    "Query\n"
-    "should utf-16 be considered harmful?\n"
-    "<query> should utf-16 be considered harmful? </query>\n"
-    "<answer 1> The question of whether UTF-16 should be considered harmful is subject to differing "
-    "opinions. One perspective suggests that UTF-16 is harmful due to a historical misconception "
-    "about character encoding and recommends UTF-8 as the superior choice for various text interfaces. "
-    "Another viewpoint argues that UTF-16 is not inherently harmful, emphasizing its utility in specific "
-    "scenarios where it serves as a compromise between simplicity and compactness. The choice between "
-    "UTF-16 and other encodings like UTF-8 depends on the specific requirements of the application, such "
-    "as compatibility with ASCII or the need to efficiently encode certain character sets. </answer 1>\n"
-    "<answer 2> UTF-16 should not be considered harmful. However, contrasting views argue that UTF-16 "
-    "should indeed be considered harmful. Some argue that the very reason UTF-16 exists is because some "
-    "time ago there used to be a misguided belief that WideChar is going to be what UCS-4 now is. "
-    "Additionally, the harmfulness of UTF-16 is tied to issues with exercising code. </answer 2>\n"
-    "Both <answer 1> and <answer 2> reconcile the two conflicting views with detailed explanation.\n"
-    "I am not sure which one is better."
-)
-
-lfrqa_prompt_template = (
-    # From RAG-QA Arena (https://arxiv.org/pdf/2407.13998) Table 14
-    "Query is in the <query></query> tags. Answer 1 is in <answer 1></answer 1>,"
-    "and Answer 2 is in <answer 2></answer 2>.\n"
-    "<query> {question} </query>\n"
-    "<answer 1> {answer1} </answer 1>\n"
-    "<answer 2> {answer2} </answer 2>\n"
-    "Review the rubric in <rubric> tags,\n"
-    "- if you prefer <answer 1>, output 1.\n"
-    "- if you prefer <answer 2>, output 2.\n"
-    "- if you are not sure, output 0.\n"
-    "First, think step by step, put your thinking in <thinking></thinking> tags.\n"
-    "Your thinking must be shorter than 50 words.\n"
-    "Then, provide your rating inside <rating></rating> tags.\n"
-    "Remember your rating should be 0 if you are not sure, and your rating must be either 0, 1, or 2."
-)

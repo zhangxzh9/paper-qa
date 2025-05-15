@@ -307,7 +307,7 @@ class SearchIndex:
                 try:
                     async with self.writer() as writer:
                         # Let caller handle commit to allow for batching
-                        writer.add_document(Document.from_dict(index_doc))  # type: ignore[call-arg]
+                        writer.add_document(Document.from_dict(index_doc))
 
                     filehash = self.filehash(index_doc["body"])
                     (await self.index_files)[index_doc["file_location"]] = filehash
@@ -469,8 +469,9 @@ async def maybe_get_manifest(
                     f" file {filename}."
                 )
             logger.debug(
-                f"Found manifest file at {filename}, read {len(file_loc_to_records)} records"
-                f" from it, which maps to {len(file_loc_to_records)} locations."
+                f"Found manifest file at {filename}, read"
+                f" {len(file_loc_to_records)} records from it, which maps to"
+                f" {len(file_loc_to_records)} locations."
             )
         except FileNotFoundError:
             logger.warning(f"Manifest file at {filename} could not be found.")

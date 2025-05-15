@@ -17,7 +17,13 @@ from uuid import uuid4
 
 import ldp.agent
 import pytest
-from aviary.core import Tool, ToolRequestMessage, ToolsAdapter, ToolSelector
+from aviary.core import (
+    Environment,
+    Tool,
+    ToolRequestMessage,
+    ToolsAdapter,
+    ToolSelector,
+)
 from ldp.agent import MemoryAgent, SimpleAgent
 from ldp.graph.memory import Memory, UIndexMemoryModel
 from ldp.graph.ops import OpResult
@@ -29,6 +35,7 @@ from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
 from paperqa.agents import SearchIndex, agent_query
 from paperqa.agents.env import (
     CLINICAL_STATUS_SEARCH_REGEX_PATTERN,
+    PaperQAEnvironment,
     clinical_trial_status,
     settings_to_tools,
 )
@@ -151,7 +158,7 @@ async def test_resuming_crashed_index_build(agent_test_settings: Settings) -> No
     num_source_files = len(
         [
             x
-            for x in cast(Path, index_settings.paper_directory).iterdir()
+            for x in cast("Path", index_settings.paper_directory).iterdir()
             if x.suffix != ".csv"
         ]
     )
@@ -238,7 +245,7 @@ EXPECTED_STUB_DATA_FILES = {
 async def test_get_directory_index_w_manifest(agent_test_settings: Settings) -> None:
     # Set the paper_directory to be a relative path as starting point to confirm this
     # won't trip us up, and set the manifest file too
-    abs_paper_dir = cast(Path, agent_test_settings.agent.index.paper_directory)
+    abs_paper_dir = cast("Path", agent_test_settings.agent.index.paper_directory)
     agent_test_settings.agent.index.paper_directory = abs_paper_dir.relative_to(
         Path.cwd()
     )
@@ -305,10 +312,12 @@ async def test_get_directory_index_w_no_citations(
 @pytest.mark.parametrize("llm_name", ["gpt-4o", "gemini/gemini-1.5-flash"])
 @pytest.mark.asyncio
 async def test_agent_types(
-    agent_test_settings: Settings, agent_type: str | type, llm_name: str
+    agent_test_settings: Settings,
+    agent_type: str | type,
+    llm_name: str,
+    subtests: SubTests,
 ) -> None:
     question = "How can you use XAI for chemical property prediction?"
-
     # make sure agent_llm is different from default, so we can correctly track tokens
     # for agent
     agent_test_settings.agent.agent_llm = llm_name
@@ -342,6 +351,17 @@ async def test_agent_types(
         ), "Expected many completion tokens"
         assert response.session.cost > 0, "Expected nonzero cost"
 
+    with subtests.test("Test citation formatting"):
+        citation_w_et_al = r"\b[\w\-]+\set\sal\.\s\([0-9]{4}\)"
+        assert not re.search(
+            citation_w_et_al, response.session.answer
+        ), "Answer contains citation with et al. instead of citation key"
+
+        missing_pages_regex = r"\b([a-zA-Z]+\d{4}[a-zA-Z]*\s+\d+-\d+)\b"
+        assert not re.search(
+            missing_pages_regex, response.session.answer
+        ), "Answer contains citation with missing 'pages' keyword"
+
 
 @pytest.mark.asyncio
 async def test_successful_memory_agent(agent_test_settings: Settings) -> None:
@@ -356,11 +376,11 @@ async def test_successful_memory_agent(agent_test_settings: Settings) -> None:
             " and you have already tried to answer several times,"
             " you can terminate by calling the {complete_tool_name} tool."
             " The current status of evidence/papers/cost is "
-            f"{make_status(total_paper_count=0, relevant_paper_count=0, evidence_count=0, cost=0.0)}"  # Started 0
+            f"{make_status(total_paper_count=0, relevant_paper_count=0, evidence_count=0, cost=0.0)}"  # Started 0  # noqa: E501
             "\n\nTool request message '' for tool calls: paper_search(query='XAI for"
             " chemical property prediction', min_year='2018', max_year='2024')"
             f" [id={memory_id}]\n\nTool response message '"
-            f"{make_status(total_paper_count=2, relevant_paper_count=0, evidence_count=0, cost=0.0)}"  # Found 2
+            f"{make_status(total_paper_count=2, relevant_paper_count=0, evidence_count=0, cost=0.0)}"  # Found 2  # noqa: E501
             f"' for tool call ID {memory_id} of tool 'paper_search'"
         ),
         input=(
@@ -663,10 +683,27 @@ async def test_agent_sharing_state(
 
         # now adjust to give the agent 2x pieces of evidence
         gather_evidence_tool.settings.agent.agent_evidence_n = 2
+        # also reset the question to ensure that contexts are
+        # only returned to the agent for the new question
+        new_question = "How does XAI relate to a self-explanatory model?"
         response = await gather_evidence_tool.gather_evidence(
-            session.question, state=env_state
+            new_question, state=env_state
         )
-
+        assert len({c.question for c in session.contexts}) == 2, "Expected 2 questions"
+        # now we make sure this is only for the old question
+        for context in session.contexts:
+            if context.question != new_question:
+                assert (
+                    context.context[:20] not in response
+                ), "gather_evidence should not return any contexts for the old question"
+        assert (
+            sum(
+                (1 if (context.context[:20] in response) else 0)
+                for context in session.contexts
+                if context.question == new_question
+            )
+            == 2
+        ), "gather_evidence should only return 2 contexts for the new question"
         split = re.split(
             r"(\d+) pieces of evidence, (\d+) of which were relevant",
             response,
@@ -828,9 +865,9 @@ def test_tool_schema(agent_test_settings: Settings) -> None:
                             "type": "string",
                             "description": (
                                 "A search query, which can be a specific phrase,"
-                                " complete sentence, or general keywords, e.g."
+                                " complete sentence,\nor general keywords, e.g."
                                 " 'machine learning for immunology'. Also can be"
-                                " given search operators."
+                                "\ngiven search operators."
                             ),
                             "title": "Query",
                         },
@@ -838,7 +875,7 @@ def test_tool_schema(agent_test_settings: Settings) -> None:
                             "anyOf": [{"type": "integer"}, {"type": "null"}],
                             "description": (
                                 "Filter for minimum publication year, or None for"
-                                " no minimum year. The current year is"
+                                " no minimum year.\nThe current year is"
                                 f" {get_year()}."
                             ),
                             "title": "Min Year",
@@ -847,7 +884,7 @@ def test_tool_schema(agent_test_settings: Settings) -> None:
                             "anyOf": [{"type": "integer"}, {"type": "null"}],
                             "description": (
                                 "Filter for maximum publication year, or None for"
-                                " no maximum year. The current year is"
+                                " no maximum year.\nThe current year is"
                                 f" {get_year()}."
                             ),
                             "title": "Max Year",
@@ -869,7 +906,7 @@ def test_tool_schema(agent_test_settings: Settings) -> None:
                         "has_successful_answer": {
                             "description": (
                                 "Set True if an answer that addresses all parts of the"
-                                " task has been generated, otherwise set False to"
+                                "\ntask has been generated, otherwise set False to"
                                 " indicate unsureness."
                             ),
                             "title": "Has Successful Answer",
@@ -892,6 +929,7 @@ def test_answers_are_striped() -> None:
         contexts=[
             Context(
                 context="bla",
+                question="foo",
                 text=Text(
                     name="text",
                     text="The meaning of life is 42.",
@@ -1034,9 +1072,29 @@ async def test_index_build_concurrency(agent_test_settings: Settings) -> None:
     low_batch_save_count = mock_save_index.call_count
 
     assert high_concurrency_duration * 1.1 < low_concurrency_duration, (
-        f"Expected high concurrency to be faster, but took {high_concurrency_duration:.2f}s "
-        f"compared to {low_concurrency_duration:.2f}s"
+        "Expected high concurrency to be faster, but took"
+        f" {high_concurrency_duration:.2f}s compared to {low_concurrency_duration:.2f}s"
     )
-    assert (
-        high_batch_save_count < low_batch_save_count
-    ), f"Expected fewer save_index with high batch size, but got {high_batch_save_count} vs {low_batch_save_count}"
+    assert high_batch_save_count < low_batch_save_count, (
+        "Expected fewer save_index with high batch size, but got"
+        f" {high_batch_save_count} vs {low_batch_save_count}"
+    )
+
+
+def test_env_from_name(subtests: SubTests) -> None:
+    assert "paperqa" in Environment.available()
+
+    with subtests.test(msg="only-task"):
+        env = Environment.from_name(  # type: ignore[var-annotated]
+            "paperqa", "How can you use XAI for chemical property prediction?"
+        )
+        assert isinstance(env, PaperQAEnvironment)
+
+    with subtests.test(msg="env-kwargs"):
+        env = Environment.from_name(
+            "paperqa",
+            query="How can you use XAI for chemical property prediction?",
+            settings=Settings(),
+            docs=Docs(),
+        )
+        assert isinstance(env, PaperQAEnvironment)

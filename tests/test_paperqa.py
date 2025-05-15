@@ -9,10 +9,12 @@ from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import cast
+from uuid import UUID
 
 import httpx
 import numpy as np
 import pytest
+import pytest_asyncio
 from aviary.core import Message
 from lmi import (
     CommonLLMNames,
@@ -61,11 +63,11 @@ from paperqa.utils import (
 THIS_MODULE = pathlib.Path(__file__)
 
 
-@pytest.fixture
-def docs_fixture(stub_data_dir: Path) -> Docs:
+@pytest_asyncio.fixture
+async def docs_fixture(stub_data_dir: Path) -> Docs:
     docs = Docs()
     with (stub_data_dir / "paper.pdf").open("rb") as f:
-        docs.add_file(f, "Wellawatte et al, XAI Review, 2023")
+        await docs.aadd_file(f, "Wellawatte et al, XAI Review, 2023")
     return docs
 
 
@@ -76,7 +78,7 @@ def test_get_citations() -> None:
         " hospitalization, and death. The BNT162b2 vaccine has shown effectiveness"
         " ranging from 65% to -41% for the 5-11 years age group and 76% to 46% for the"
         " 12-17 years age group, after the emergence of the Omicron variant in New York"
-        " (Dorabawila2022EffectivenessOT). Against the Delta variant, the effectiveness"
+        " (Dorabawila2022EffectivenessOT). Against the Delta variant, the effectiveness"  # spellchecker: disable-line
         " of the BNT162b2 vaccine was approximately 88% after two doses"
         " (Bernal2021EffectivenessOC pg. 1-3).\n\nVaccine effectiveness was also found"
         " to be 89% against hospitalization and 91% against emergency department or"
@@ -92,7 +94,7 @@ def test_get_citations() -> None:
         " outcomes (Bar2000Foo pg 1-3; Far2000 pg 2-5)."
     )
     ref = {
-        "Dorabawila2022EffectivenessOT",
+        "Dorabawila2022EffectivenessOT",  # spellchecker: disable-line
         "Bernal2021EffectivenessOC pg. 1-3",
         "Thompson2021EffectivenessOC pg. 3-5",
         "Goo2031Foo pg. 3-4",
@@ -378,7 +380,9 @@ def test_extract_score() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chain_completion() -> None:
+async def test_chain_completion(caplog) -> None:
+    caplog.set_level(level="WARNING", logger="lmi.types")
+
     s = Settings(llm="babbage-002", temperature=0.2)
     outputs = []
 
@@ -386,26 +390,39 @@ async def test_chain_completion() -> None:
         outputs.append(x)
 
     llm = s.get_llm()
+    messages = [Message(content="The duck says")]
 
-    messages = [
-        Message(content="The duck says"),
-    ]
-    completion = await llm.call_single(
-        messages=messages,
-        callbacks=[accum],
-    )
+    # With callbacks, we use streaming
+    completion = await llm.call_single(messages=messages, callbacks=[accum])
+    first_id = completion.id
+    assert isinstance(first_id, UUID)
+    assert completion.text
     assert completion.seconds_to_first_token > 0
     assert completion.prompt_count > 0
     assert completion.completion_count > 0
+    assert completion.model == "babbage-002"
     assert str(completion) == "".join(outputs)
+    assert completion.cost > 0
+    assert not caplog.records
 
-    completion = await llm.call_single(
-        messages=messages,
-    )
+    # Without callbacks, we don't use streaming
+    completion = await llm.call_single(messages=messages)
+    assert isinstance(completion.id, UUID)
+    assert completion.id != first_id, "Expected different response ID"
+    assert completion.text
     assert completion.seconds_to_first_token == 0
     assert completion.seconds_to_last_token > 0
-
-    assert completion.cost > 0
+    assert completion.prompt_count > 0
+    assert completion.completion_count > 0
+    try:
+        assert completion.model == "babbage-002"
+        assert completion.cost > 0
+    except AssertionError:
+        # Account for https://github.com/BerriAI/litellm/issues/10572
+        assert any(
+            "Could not find cost for model".lower() in r.message.lower()
+            for r in caplog.records
+        )
 
 
 @pytest.mark.skipif(os.environ.get("ANTHROPIC_API_KEY") is None, reason="No API key")
@@ -475,16 +492,20 @@ async def test_docs_lifecycle(subtests: SubTests, stub_data_dir: Path) -> None:
         assert all(t not in docs.texts_index for t in docs.texts)
 
 
-def test_evidence(docs_fixture) -> None:
+@pytest.mark.asyncio
+async def test_evidence(docs_fixture) -> None:
     debug_settings = Settings.from_name("debug")
-    evidence = docs_fixture.get_evidence(
-        PQASession(question="What does XAI stand for?"),
-        settings=debug_settings,
+    evidence = (
+        await docs_fixture.aget_evidence(
+            PQASession(question="What does XAI stand for?"),
+            settings=debug_settings,
+        )
     ).contexts
     assert len(evidence) >= debug_settings.answer.evidence_k
 
 
-def test_json_evidence(docs_fixture) -> None:
+@pytest.mark.asyncio
+async def test_json_evidence(docs_fixture) -> None:
     settings = Settings.from_name("fast")
     settings.prompts.use_json = True
     settings.prompts.summary_json_system = (
@@ -497,29 +518,35 @@ def test_json_evidence(docs_fixture) -> None:
         " author , and `relevance_score` is  the relevance of `summary` to answer the"
         " question (integer out of 10)."
     )
-    evidence = docs_fixture.get_evidence(
-        PQASession(question="Who wrote this article?"),
-        settings=settings,
+    evidence = (
+        await docs_fixture.aget_evidence(
+            PQASession(question="Who wrote this article?"),
+            settings=settings,
+        )
     ).contexts
     assert evidence[0].author_name
 
 
-def test_ablations(docs_fixture) -> None:
+@pytest.mark.asyncio
+async def test_ablations(docs_fixture) -> None:
     settings = Settings()
     settings.answer.evidence_skip_summary = True
     settings.answer.evidence_retrieval = False
-    contexts = docs_fixture.get_evidence(
-        "Which page is the statement 'Deep learning (DL) is advancing the boundaries of"
-        " computational chemistry because it can accurately model non-linear"
-        " structure-function relationships.' on?",
-        settings=settings,
+    contexts = (
+        await docs_fixture.aget_evidence(
+            "Which page is the statement 'Deep learning (DL) is advancing the boundaries of"
+            " computational chemistry because it can accurately model non-linear"
+            " structure-function relationships.' on?",
+            settings=settings,
+        )
     ).contexts
     assert contexts[0].text.text == contexts[0].context, "summarization not ablated"
 
     assert len(contexts) == len(docs_fixture.texts), "evidence retrieval not ablated"
 
 
-def test_location_awareness(docs_fixture) -> None:
+@pytest.mark.asyncio
+async def test_location_awareness(docs_fixture) -> None:
     settings = Settings()
     settings.answer.evidence_k = 3
     settings.prompts.use_json = False
@@ -527,28 +554,55 @@ def test_location_awareness(docs_fixture) -> None:
     settings.prompts.summary = "{citation}\n\n{text}\n\n{question}{summary_length}"
     settings.answer.evidence_summary_length = ""
 
-    contexts = docs_fixture.get_evidence(
-        "Which page is the statement 'Deep learning (DL) is advancing the boundaries of"
-        " computational chemistry because it can accurately model non-linear"
-        " structure-function relationships.' on?",
-        settings=settings,
+    contexts = (
+        await docs_fixture.aget_evidence(
+            "Which page is the statement 'Deep learning (DL) is advancing the boundaries of"
+            " computational chemistry because it can accurately model non-linear"
+            " structure-function relationships.' on?",
+            settings=settings,
+        )
     ).contexts
     assert "1" in "\n".join(
         [c.context for c in contexts]
     ), "location not found in evidence"
 
 
-def test_query(docs_fixture) -> None:
-    docs_fixture.query("Is XAI usable in chemistry?")
+@pytest.mark.asyncio
+async def test_query(docs_fixture) -> None:
+    settings = Settings(prompts={"answer_iteration_prompt": None})
+    await docs_fixture.aquery("Is XAI usable in chemistry?", settings=settings)
 
 
-def test_llmresult_callback(docs_fixture: Docs) -> None:
+@pytest.mark.asyncio
+async def test_query_with_iteration(docs_fixture) -> None:
+    # we store these results to check that the prompts are OK
+    my_results: list[LLMResult] = []
+    # explicitly set the prompt to use QA iterations
+    settings = Settings()
+    llm = settings.get_llm()
+    llm.llm_result_callback = my_results.append
+    prior_answer = "No, it isn't usable in chemistry."
+    question = "Is XAI usable in chemistry?"
+    prior_session = PQASession(question=question, answer=prior_answer)
+    await docs_fixture.aquery(prior_session, llm_model=llm, settings=settings)
+    assert prior_answer in cast(
+        "str", my_results[-1].prompt[1].content  # type: ignore[union-attr, index]
+    ), "prior answer not in prompt"
+    # run without a prior session to check that the flow works correctly
+    await docs_fixture.aquery(question, llm_model=llm, settings=settings)
+    assert settings.prompts.answer_iteration_prompt[:10] not in cast(  # type: ignore[index]
+        "str", my_results[-1].prompt[1].content  # type: ignore[union-attr, index]
+    ), "prior answer prompt should not be inserted"
+
+
+@pytest.mark.asyncio
+async def test_llmresult_callback(docs_fixture: Docs) -> None:
     my_results: list[LLMResult] = []
 
     settings = Settings.from_name("fast")
     summary_llm = settings.get_summary_llm()
     summary_llm.llm_result_callback = my_results.append
-    docs_fixture.get_evidence(
+    await docs_fixture.aget_evidence(
         "What is XAI?", settings=settings, summary_llm_model=summary_llm
     )
     assert my_results
@@ -557,16 +611,53 @@ def test_llmresult_callback(docs_fixture: Docs) -> None:
     assert my_results[0].session_id
 
 
-def test_duplicate(stub_data_dir: Path) -> None:
+@pytest.mark.parametrize(
+    ("llm", "llm_settings"),
+    [
+        pytest.param(
+            "deepseek/deepseek-reasoner",
+            {
+                "model_list": [
+                    {
+                        "model_name": "deepseek/deepseek-reasoner",
+                        "litellm_params": {
+                            "model": "deepseek/deepseek-reasoner",
+                            "api_base": "https://api.deepseek.com/v1",
+                        },
+                    }
+                ]
+            },
+            id="deepseek-reasoner",
+        ),
+        pytest.param(
+            "openrouter/deepseek/deepseek-r1",
+            {},
+            id="openrouter-deepseek",
+        ),
+    ],
+)
+@pytest.mark.vcr(match_on=[*VCR_DEFAULT_MATCH_ON, "body"])
+@pytest.mark.asyncio
+async def test_get_reasoning(docs_fixture: Docs, llm: str, llm_settings: dict) -> None:
+    settings = Settings(
+        llm=llm,
+        llm_settings=llm_settings,
+    )
+    response = await docs_fixture.aquery("What is XAI?", settings=settings)
+    assert response.answer_reasoning
+
+
+@pytest.mark.asyncio
+async def test_duplicate(stub_data_dir: Path) -> None:
     """Check Docs doesn't store duplicates, while checking nonduplicate docs are stored."""
     docs = Docs()
-    assert docs.add(
+    assert await docs.aadd(
         stub_data_dir / "bates.txt",
         citation="WikiMedia Foundation, 2023, Accessed now",
         dockey="test1",
     )
     assert (
-        docs.add(
+        await docs.aadd(
             stub_data_dir / "bates.txt",
             citation="WikiMedia Foundation, 2023, Accessed now",
             dockey="test1",
@@ -574,7 +665,7 @@ def test_duplicate(stub_data_dir: Path) -> None:
         is None
     )
     assert len(docs.docs) == 1, "Should have added only one document"
-    assert docs.add(
+    assert await docs.aadd(
         stub_data_dir / "flag_day.html",
         citation="WikiMedia Foundation, 2023, Accessed now",
         dockey="test2",
@@ -657,10 +748,13 @@ async def test_docs_with_custom_embedding(
         assert len(docs.texts_index.texts_hashes) == 0
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("vector_store", [NumpyVectorStore, QdrantVectorStore])
-def test_sparse_embedding(stub_data_dir: Path, vector_store: type[VectorStore]) -> None:
+async def test_sparse_embedding(
+    stub_data_dir: Path, vector_store: type[VectorStore]
+) -> None:
     docs = Docs(texts_index=vector_store())
-    docs.add(
+    await docs.aadd(
         stub_data_dir / "bates.txt",
         citation="WikiMedia Foundation, 2023, Accessed now",
         embedding_model=SparseEmbeddingModel(),
@@ -679,13 +773,16 @@ def test_sparse_embedding(stub_data_dir: Path, vector_store: type[VectorStore]) 
     assert np.shape(docs.texts[0].embedding) == np.shape(docs.texts[1].embedding)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("vector_store", [NumpyVectorStore, QdrantVectorStore])
-def test_hybrid_embedding(stub_data_dir: Path, vector_store: type[VectorStore]) -> None:
+async def test_hybrid_embedding(
+    stub_data_dir: Path, vector_store: type[VectorStore]
+) -> None:
     emb_model = HybridEmbeddingModel(
         models=[LiteLLMEmbeddingModel(), SparseEmbeddingModel()]
     )
     docs = Docs(texts_index=vector_store())
-    docs.add(
+    await docs.aadd(
         stub_data_dir / "bates.txt",
         citation="WikiMedia Foundation, 2023, Accessed now",
         embedding_model=emb_model,
@@ -704,7 +801,7 @@ def test_hybrid_embedding(stub_data_dir: Path, vector_store: type[VectorStore]) 
     emb_settings = Settings(
         embedding="hybrid-text-embedding-3-small",
     )
-    docs.add(
+    await docs.aadd(
         stub_data_dir / "bates.txt",
         citation="WikiMedia Foundation, 2023, Accessed now",
         embedding_model=emb_settings.get_embedding_model(),
@@ -712,9 +809,10 @@ def test_hybrid_embedding(stub_data_dir: Path, vector_store: type[VectorStore]) 
     assert any(docs.texts[0].embedding)
 
 
-def test_custom_llm(stub_data_dir: Path) -> None:
+@pytest.mark.asyncio
+async def test_custom_llm(stub_data_dir: Path) -> None:
     class StubLLMModel(LLMModel):
-        name: str = "myllm"
+        name: str = "custom/myllm"
 
         async def acompletion(
             self, messages: list[Message], **kwargs  # noqa: ARG002
@@ -745,7 +843,7 @@ def test_custom_llm(stub_data_dir: Path) -> None:
             """This is a dummy check."""
 
     docs = Docs()
-    docs.add(
+    await docs.aadd(
         stub_data_dir / "bates.txt",
         citation="WikiMedia Foundation, 2023, Accessed now",
         dockey="test",
@@ -753,24 +851,29 @@ def test_custom_llm(stub_data_dir: Path) -> None:
     )
     # ensure JSON summaries are not used
     no_json_settings = Settings(prompts={"use_json": False})
-    evidence = docs.get_evidence(
-        "Echo", summary_llm_model=StubLLMModel(), settings=no_json_settings
+    evidence = (
+        await docs.aget_evidence(
+            "Echo", summary_llm_model=StubLLMModel(), settings=no_json_settings
+        )
     ).contexts
     assert "Echo" in evidence[0].context
 
-    evidence = docs.get_evidence(
-        "Echo",
-        callbacks=[print_callback],
-        summary_llm_model=StubLLMModel(),
-        settings=no_json_settings,
+    evidence = (
+        await docs.aget_evidence(
+            "Echo",
+            callbacks=[print_callback],
+            summary_llm_model=StubLLMModel(),
+            settings=no_json_settings,
+        )
     ).contexts
     assert "Echo" in evidence[0].context
 
 
-def test_docs_pickle(stub_data_dir) -> None:
+@pytest.mark.asyncio
+async def test_docs_pickle(stub_data_dir) -> None:
     """Ensure that Docs object can be pickled and unpickled correctly."""
     docs = Docs()
-    docs.add(
+    await docs.aadd(
         stub_data_dir / "flag_day.html",
         "WikiMedia Foundation, 2023, Accessed now",
         dockey="test",
@@ -784,6 +887,7 @@ def test_docs_pickle(stub_data_dir) -> None:
     assert len(unpickled_docs.docs) == 1
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("qa_prompt", "unsure_sentinel"),
     [
@@ -795,7 +899,7 @@ def test_docs_pickle(stub_data_dir) -> None:
         ),
     ],
 )
-def test_unrelated_context(
+async def test_unrelated_context(
     agent_test_settings: Settings,
     stub_data_dir: Path,
     qa_prompt: str,
@@ -805,27 +909,30 @@ def test_unrelated_context(
     assert unsure_sentinel in qa_prompt, "Test relies on unsure sentinel in qa prompt"
 
     docs = Docs()
-    docs.add(stub_data_dir / "bates.txt", "WikiMedia Foundation, 2023, Accessed now")
-    session = docs.query(
+    await docs.aadd(
+        stub_data_dir / "bates.txt", "WikiMedia Foundation, 2023, Accessed now"
+    )
+    session = await docs.aquery(
         "What do scientist estimate as the planetary composition of Jupyter?",
         settings=agent_test_settings,
     )
     assert unsure_sentinel in session.answer
 
 
-def test_repeat_keys(stub_data_dir) -> None:
+@pytest.mark.asyncio
+async def test_repeat_keys(stub_data_dir) -> None:
     docs = Docs()
-    result = docs.add(
+    result = await docs.aadd(
         stub_data_dir / "bates.txt", "WikiMedia Foundation, 2023, Accessed now"
     )
     assert result
-    result = docs.add(
+    result = await docs.aadd(
         stub_data_dir / "bates.txt", "WikiMedia Foundation, 2023, Accessed now"
     )
     assert not result
     assert len(docs.docs) == 1
 
-    docs.add(
+    await docs.aadd(
         stub_data_dir / "flag_day.html", "WikiMedia Foundation, 2023, Accessed now"
     )
     assert len(docs.docs) == 2
@@ -836,14 +943,19 @@ def test_repeat_keys(stub_data_dir) -> None:
     assert ds[1].docname == "Wiki2023a"
 
 
-def test_can_read_normal_pdf_reader(docs_fixture) -> None:
-    answer = docs_fixture.query("Are counterfactuals actionable? [yes/no]")
+@pytest.mark.asyncio
+async def test_can_read_normal_pdf_reader(docs_fixture) -> None:
+    answer = await docs_fixture.aquery("Are counterfactuals actionable? [yes/no]")
     assert "yes" in answer.answer or "Yes" in answer.answer
 
 
-def test_pdf_reader_w_no_match_doc_details(stub_data_dir: Path) -> None:
+@pytest.mark.asyncio
+async def test_pdf_reader_w_no_match_doc_details(stub_data_dir: Path) -> None:
     docs = Docs()
-    docs.add(stub_data_dir / "paper.pdf", "Wellawatte et al, XAI Review, 2023")
+    await docs.aadd(
+        stub_data_dir / "paper.pdf",
+        "Wellawatte et al, XAI Review, 2023",
+    )
     # doc will be a DocDetails object, but nothing can be found
     # thus, we retain the prior citation data
     assert (
@@ -855,7 +967,8 @@ def test_pdf_reader_w_no_match_doc_details(stub_data_dir: Path) -> None:
     ), "Formatted citation should be the same when no metadata is found."
 
 
-def test_pdf_reader_w_no_chunks(stub_data_dir: Path) -> None:
+@pytest.mark.asyncio
+async def test_pdf_reader_w_no_chunks(stub_data_dir: Path) -> None:
     settings = Settings.from_name("debug")
     assert settings.parsing.defer_embedding, "Test relies on deferred embedding"
     settings.parsing.chunk_size = 0  # Leads to one chunk = entire text
@@ -864,7 +977,7 @@ def test_pdf_reader_w_no_chunks(stub_data_dir: Path) -> None:
     settings.summary_llm = "gpt-4o-mini"  # context window needs to fit our one chunk
 
     docs = Docs()
-    docs.add(
+    await docs.aadd(
         stub_data_dir / "paper.pdf",
         "Wellawatte et al, XAI Review, 2023",
         settings=settings,
@@ -911,13 +1024,15 @@ async def test_partly_embedded_texts(defer_embeddings: bool) -> None:
     assert len(docs.texts_index.texts_hashes) == len(texts_to_add)
 
 
-# some of the stored requests will be identical on method, scheme, host, port, path, and query (if defined)
+# some of the stored requests will be identical on
+# method, scheme, host, port, path, and query (if defined)
 # body will always be different between requests
 # adding body so that vcr correctly match the right request with its response.
 @pytest.mark.vcr(match_on=[*VCR_DEFAULT_MATCH_ON, "body"])
-def test_pdf_reader_match_doc_details(stub_data_dir: Path) -> None:
+@pytest.mark.asyncio
+async def test_pdf_reader_match_doc_details(stub_data_dir: Path) -> None:
     docs = Docs()
-    docs.add(
+    await docs.aadd(
         stub_data_dir / "paper.pdf",
         "Wellawatte et al, A Perspective on Explanations of Molecular Prediction"
         " Models, XAI Review, 2023",
@@ -959,36 +1074,38 @@ def test_pdf_reader_match_doc_details(stub_data_dir: Path) -> None:
 
     num_retries = 3
     for _ in range(num_retries):
-        answer = docs.query("Are counterfactuals actionable? [yes/no]")
+        answer = await docs.aquery("Are counterfactuals actionable? [yes/no]")
         if any(w in answer.answer for w in ("yes", "Yes")):
             assert f"This article has {num_citations} citations" in answer.context
             return
     raise AssertionError(f"Query was incorrect across {num_retries} retries.")
 
 
-def test_fileio_reader_pdf(stub_data_dir: Path) -> None:
+@pytest.mark.asyncio
+async def test_fileio_reader_pdf(stub_data_dir: Path) -> None:
     with (stub_data_dir / "paper.pdf").open("rb") as f:
         docs = Docs()
-        docs.add_file(f, "Wellawatte et al, XAI Review, 2023")
+        await docs.aadd_file(f, "Wellawatte et al, XAI Review, 2023")
     num_retries = 3
     for _ in range(num_retries):
-        answer = docs.query("Are counterfactuals actionable? [yes/no]")
+        answer = await docs.aquery("Are counterfactuals actionable? [yes/no]")
         if any(w in answer.answer for w in ("yes", "Yes")):
             return
     raise AssertionError(f"Query was incorrect across {num_retries} retries.")
 
 
-def test_fileio_reader_txt(stub_data_dir: Path) -> None:
+@pytest.mark.asyncio
+async def test_fileio_reader_txt(stub_data_dir: Path) -> None:
     # can't use curie, because it has trouble with parsed HTML
     docs = Docs()
     with (stub_data_dir / "bates.txt").open("rb") as file:
         file_content = file.read()
 
-    docs.add_file(
+    await docs.aadd_file(
         BytesIO(file_content),
         "WikiMedia Foundation, 2023, Accessed now",
     )
-    answer = docs.query("What country was Frederick Bates born in?")
+    answer = await docs.aquery("What country was Frederick Bates born in?")
     assert "United States" in answer.answer
 
 
@@ -1059,15 +1176,16 @@ async def test_chunk_metadata_reader(stub_data_dir: Path) -> None:
     assert metadata.total_parsed_text_length // 3000 <= len(chunk_text)
 
 
-def test_code() -> None:
+@pytest.mark.asyncio
+async def test_code() -> None:
     settings = Settings.from_name("fast")
     docs = Docs()
     # load this script
-    docs.add(
+    await docs.aadd(
         THIS_MODULE, "test_paperqa.py", docname="test_paperqa.py", disable_check=True
     )
     assert len(docs.docs) == 1
-    session = docs.query("What file is read in by test_code?", settings=settings)
+    session = await docs.aquery("What file is read in by test_code?", settings=settings)
     assert "test_paperqa.py" in session.answer
 
 
@@ -1079,17 +1197,18 @@ def test_zotero() -> None:
         ZoteroDB()  # "group" if group library
 
 
-def test_too_much_evidence(
+@pytest.mark.asyncio
+async def test_too_much_evidence(
     stub_data_dir: Path, stub_data_dir_w_near_dupes: Path
 ) -> None:
     doc_path = stub_data_dir / "obama.txt"
     mini_settings = Settings(llm="gpt-4o-mini", summary_llm="gpt-4o-mini")
     docs = Docs()
-    docs.add(
+    await docs.aadd(
         doc_path, "WikiMedia Foundation, 2023, Accessed now", settings=mini_settings
     )
     # add with new dockey
-    docs.add(
+    await docs.aadd(
         stub_data_dir_w_near_dupes / "obama_modified.txt",
         "WikiMedia Foundation, 2023, Accessed now",
         settings=mini_settings,
@@ -1097,10 +1216,11 @@ def test_too_much_evidence(
     settings = Settings.from_name("fast")
     settings.answer.evidence_k = 10
     settings.answer.answer_max_sources = 10
-    docs.query("What is Barrack's greatest accomplishment?", settings=settings)
+    await docs.aquery("What is Barrack's greatest accomplishment?", settings=settings)
 
 
-def test_custom_prompts(stub_data_dir: Path) -> None:
+@pytest.mark.asyncio
+async def test_custom_prompts(stub_data_dir: Path) -> None:
     my_qaprompt = (
         "Answer the question '{question}' using the country name alone. For example: A:"
         " United States\nA: Canada\nA: Mexico\n\n Using the"
@@ -1109,12 +1229,17 @@ def test_custom_prompts(stub_data_dir: Path) -> None:
     settings = Settings.from_name("fast")
     settings.prompts.qa = my_qaprompt
     docs = Docs()
-    docs.add(stub_data_dir / "bates.txt", "WikiMedia Foundation, 2023, Accessed now")
-    answer = docs.query("What country is Frederick Bates from?", settings=settings)
+    await docs.aadd(
+        stub_data_dir / "bates.txt", "WikiMedia Foundation, 2023, Accessed now"
+    )
+    answer = await docs.aquery(
+        "What country is Frederick Bates from?", settings=settings
+    )
     assert "United States" in answer.answer
 
 
-def test_pre_prompt(stub_data_dir: Path) -> None:
+@pytest.mark.asyncio
+async def test_pre_prompt(stub_data_dir: Path) -> None:
     pre = (
         "What is water's boiling point in Fahrenheit? Please respond with a complete"
         " sentence."
@@ -1123,38 +1248,48 @@ def test_pre_prompt(stub_data_dir: Path) -> None:
     settings = Settings.from_name("fast")
     settings.prompts.pre = pre
     docs = Docs()
-    docs.add(stub_data_dir / "bates.txt", "WikiMedia Foundation, 2023, Accessed now")
-    assert "212" not in docs.query("What is the boiling point of water?").answer
+    await docs.aadd(
+        stub_data_dir / "bates.txt", "WikiMedia Foundation, 2023, Accessed now"
+    )
+    assert (
+        "212" not in (await docs.aquery("What is the boiling point of water?")).answer
+    )
     assert (
         "212"
-        in docs.query("What is the boiling point of water?", settings=settings).answer
+        in (
+            await docs.aquery("What is the boiling point of water?", settings=settings)
+        ).answer
     )
 
 
-def test_post_prompt(stub_data_dir: Path) -> None:
+@pytest.mark.asyncio
+async def test_post_prompt(stub_data_dir: Path) -> None:
     post = "The opposite of down is"
     settings = Settings.from_name("fast")
     settings.prompts.post = post
     docs = Docs()
-    docs.add(stub_data_dir / "bates.txt", "WikiMedia Foundation, 2023, Accessed now")
-    response = docs.query("What country is Bates from?", settings=settings)
+    await docs.aadd(
+        stub_data_dir / "bates.txt", "WikiMedia Foundation, 2023, Accessed now"
+    )
+    response = await docs.aquery("What country is Bates from?", settings=settings)
     assert "up" in response.answer.lower()
 
 
-def test_external_doc_index(stub_data_dir: Path) -> None:
+@pytest.mark.asyncio
+async def test_external_doc_index(stub_data_dir: Path) -> None:
     docs = Docs()
-    docs.add(
+    await docs.aadd(
         stub_data_dir / "flag_day.html", "WikiMedia Foundation, 2023, Accessed now"
     )
     # force embedding
-    _ = docs.get_evidence(query="What is the date of flag day?")
+    _ = await docs.aget_evidence(query="What is the date of flag day?")
     docs2 = Docs(texts_index=docs.texts_index)
     assert not docs2.docs
-    assert docs2.get_evidence("What is the date of flag day?").contexts
+    assert (await docs2.aget_evidence("What is the date of flag day?")).contexts
 
 
-def test_context_inner_outer_prompt(stub_data_dir: Path) -> None:
-
+@pytest.mark.asyncio
+async def test_context_inner_outer_prompt(stub_data_dir: Path) -> None:
     prompt_settings = Settings()
 
     # try bogus prompt
@@ -1170,21 +1305,26 @@ def test_context_inner_outer_prompt(stub_data_dir: Path) -> None:
     settings.prompts.context_inner = "{name} @@@@@ {text}\nFrom: {citation}"
     settings.prompts.context_outer = "{context_str}"
     docs = Docs()
-    docs.add(stub_data_dir / "bates.txt", "WikiMedia Foundation, 2023, Accessed now")
-    response = docs.query("What country is Bates from?", settings=settings)
+    await docs.aadd(
+        stub_data_dir / "bates.txt", "WikiMedia Foundation, 2023, Accessed now"
+    )
+    response = await docs.aquery("What country is Bates from?", settings=settings)
     assert "@@@@@" in response.context
     assert "WikiMedia Foundation, 2023" in response.context
     assert "Valid Keys" not in response.context
 
 
-def test_evidence_detailed_citations_shim(stub_data_dir: Path) -> None:
+@pytest.mark.asyncio
+async def test_evidence_detailed_citations_shim(stub_data_dir: Path) -> None:
     # TODO: delete this test in v6
     settings = Settings.from_name("fast")
     # NOTE: this bypasses DeprecationWarning, as the warning is done on construction
     settings.answer.evidence_detailed_citations = False
     docs = Docs()
-    docs.add(stub_data_dir / "bates.txt", "WikiMedia Foundation, 2023, Accessed now")
-    response = docs.query("What country is Bates from?", settings=settings)
+    await docs.aadd(
+        stub_data_dir / "bates.txt", "WikiMedia Foundation, 2023, Accessed now"
+    )
+    response = await docs.aquery("What country is Bates from?", settings=settings)
     assert "WikiMedia Foundation, 2023, Accessed now" not in response.context
 
 
@@ -1384,7 +1524,7 @@ async def test_partitioning_fn_docs(use_partition: bool) -> None:
     await docs._build_texts_index(settings.get_embedding_model())
 
     partitioned_texts, _ = cast(
-        tuple[Sequence[Text], list[float]],
+        "tuple[Sequence[Text], list[float]]",
         await docs.texts_index.partitioned_similarity_search(
             "What do I like?",
             k=4,
@@ -1394,7 +1534,7 @@ async def test_partitioning_fn_docs(use_partition: bool) -> None:
     )
 
     default_texts, _ = cast(
-        tuple[Sequence[Text], list[float]],
+        "tuple[Sequence[Text], list[float]]",
         await docs.texts_index.similarity_search(
             "What do I like?", k=4, embedding_model=settings.get_embedding_model()
         ),
@@ -1488,10 +1628,8 @@ class TestLLMParseJson:
         "input_text",
         [
             pytest.param(
-                "<think> Thinking </think>"
-                "\n I am here to help\n\n"
-                '{\n"summary": "Lorem Ipsum\n\ndolor sit amet",\n"relevance_score": 8\n}'
-                "\nHope this helps!",
+                '<think> Thinking </think>\n I am here to help\n\n{\n"summary": "Lorem'
+                ' Ipsum\n\ndolor sit amet",\n"relevance_score": 8\n}\nHope this helps!',
                 id="handling-newlines-in-json-values",
             ),
         ],
@@ -1518,10 +1656,8 @@ class TestLLMParseJson:
                 id="string-relevance-score",
             ),
             pytest.param(
-                "<think> Thinking </think>"
-                "I am here to help"
-                '```json {   "summary": "Lorem Ipsum",   "relevance_score": "8/10" } ```'
-                "Hope this helps!",
+                '<think> Thinking </think>I am here to help```json {   "summary":'
+                ' "Lorem Ipsum",   "relevance_score": "8/10" } ```Hope this helps!',
                 id="string-relevance-score-fraction-1",
             ),
             pytest.param(
@@ -1629,7 +1765,7 @@ class TestLLMParseJson:
         "input_text",
         [
             pytest.param(
-                "<think> Thinking </think>" "Lorem Ipsum. Hope this helps!",
+                "<think> Thinking </think>Lorem Ipsum. Hope this helps!",
                 id="non-json-string-with-think-tags",
             ),
             pytest.param(
@@ -1656,15 +1792,16 @@ class TestLLMParseJson:
         "input_text",
         [
             pytest.param(
-                '{\n  "summary": "An excerpt with "quoted stuff" or "maybe more." More stuff (with parenthesis).",\n'
-                '  "relevance_score": "8"\n}'
+                '{\n  "summary": "An excerpt with "quoted stuff" or "maybe more." More'
+                ' stuff (with parenthesis).",\n  "relevance_score": "8"\n}'
             ),
         ],
     )
     def test_llm_subquotes_and_newlines(self, input_text: str) -> None:
         output = {
             "summary": (
-                'An excerpt with "quoted stuff" or "maybe more." More stuff (with parenthesis).'
+                'An excerpt with "quoted stuff" or "maybe more." More stuff (with'
+                " parenthesis)."
             ),
             "relevance_score": 8,
         }

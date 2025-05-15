@@ -24,6 +24,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, CliSettingsSource, SettingsConfigDict
 
 from paperqa._ldp_shims import (
@@ -41,6 +42,7 @@ from paperqa._ldp_shims import (
 from paperqa.prompts import (
     CONTEXT_INNER_PROMPT,
     CONTEXT_OUTER_PROMPT,
+    answer_iteration_prompt_template,
     citation_prompt,
     default_system_prompt,
     env_reset_prompt,
@@ -264,6 +266,13 @@ class PromptSettings(BaseModel):
 
     summary: str = summary_prompt
     qa: str = qa_prompt
+    answer_iteration_prompt: str | None = Field(
+        default=answer_iteration_prompt_template,
+        description=(
+            "Prompt to inject existing prior answers into the qa prompt to allow the model to iterate. "
+            "If None, then no prior answers will be injected."
+        ),
+    )
     select: str = select_paper_prompt
     pre: str | None = Field(
         default=None,
@@ -387,7 +396,7 @@ class IndexSettings(BaseModel):
         ),
     )
     index_directory: str | os.PathLike = Field(
-        default=pqa_directory("indexes"),
+        default_factory=lambda: pqa_directory("indexes"),
         description=(
             "Directory to store the PQA built search index, configuration, and"
             " answer indexes."
@@ -666,7 +675,7 @@ class Settings(BaseSettings):
         frozen=True,
     )
     index_directory: str | os.PathLike | None = Field(
-        default=pqa_directory("indexes"),
+        default_factory=lambda: pqa_directory("indexes"),
         description=(
             "Directory to store the PQA generated search index, configuration, and"
             " answer indexes."
@@ -709,15 +718,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _deprecated_field(self) -> Self:
-        for deprecated_field_name, new_name in (
-            ("index_absolute_directory", "use_absolute_paper_directory"),
-            ("index_directory", "index_directory"),
-            ("index_recursively", "recurse_subdirectories"),
-            ("manifest_file", "manifest_file"),
-            ("paper_directory", "paper_directory"),
+        for deprecated_field_name, new_name, is_factory in (
+            ("index_absolute_directory", "use_absolute_paper_directory", False),
+            ("index_directory", "index_directory", True),
+            ("index_recursively", "recurse_subdirectories", False),
+            ("manifest_file", "manifest_file", False),
+            ("paper_directory", "paper_directory", False),
         ):
             value = getattr(self, deprecated_field_name)
-            if value != type(self).model_fields[deprecated_field_name].default:
+            finfo: FieldInfo = type(self).model_fields[deprecated_field_name]
+            if value != (finfo.default_factory() if is_factory else finfo.default):  # type: ignore[call-arg,misc]
                 warnings.warn(
                     f"The {deprecated_field_name!r} field has been moved to"
                     f" {AgentSettings.__name__},"
@@ -804,7 +814,7 @@ class Settings(BaseSettings):
                 importlib.resources.files("paperqa.configs") / f"{config_name}.json"
             )
             if pkg_config_path.is_file():
-                json_path = cast(pathlib.Path, pkg_config_path)
+                json_path = cast("pathlib.Path", pkg_config_path)
         except FileNotFoundError as e:
             raise FileNotFoundError(
                 f"No configuration file found for {config_name}"
@@ -887,7 +897,7 @@ class Settings(BaseSettings):
             )
 
         # TODO: support general agents
-        agent_cls = cast(type[Agent], locate(agent_type))
+        agent_cls = cast("type[Agent]", locate(agent_type))
         agent_settings = self.agent
         agent_llm, config = agent_settings.agent_llm, agent_settings.agent_config or {}
         if issubclass(agent_cls, ReActAgent | MemoryAgent):
@@ -934,12 +944,11 @@ class Settings(BaseSettings):
         raise NotImplementedError(f"Didn't yet handle agent type {agent_type}.")
 
     def adjust_tools_for_agent_llm(self, tools: list[Tool]) -> None:
-        # Google gemini/gemini-1.5-flash fails to support empty dict properties
-        # SEE: https://github.com/BerriAI/litellm/issues/7634
-        if "gemini" in self.agent.agent_llm.lower():
-            for t in tools:
-                if not t.info.get_properties():
-                    t.info.parameters = None
+        """In-place adjust tool attributes or schemae to match agent LLM-specifics."""
+        # This was originally made for Gemini 1.5 Flash not supporting empty tool args
+        # in February 2025 (https://github.com/BerriAI/litellm/issues/7634), but then
+        # Gemini fixed this server-side by mid-April 2025,
+        # so this method is now just available for use
 
 
 # Settings: already Settings
