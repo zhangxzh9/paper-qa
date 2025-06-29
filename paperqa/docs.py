@@ -15,12 +15,7 @@ from typing import Any, BinaryIO, cast
 from uuid import UUID, uuid4
 
 from aviary.core import Message
-from lmi import (
-    Embeddable,
-    EmbeddingModel,
-    LLMModel,
-    LLMResult,
-)
+from lmi import Embeddable, EmbeddingModel, LLMModel
 from lmi.types import set_llm_session_ids
 from lmi.utils import gather_with_concurrency
 from pydantic import (
@@ -53,15 +48,6 @@ from paperqa.utils import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-# this is just to reduce None checks/type checks
-async def empty_callback(result: LLMResult) -> None:
-    pass
-
-
-async def print_callback(result: LLMResult) -> None:
-    pass
 
 
 class Docs(BaseModel):
@@ -312,6 +298,7 @@ class Docs(BaseModel):
                 chunk_chars=parse_config.chunk_size,
                 overlap=parse_config.overlap,
                 page_size_limit=parse_config.page_size_limit,
+                use_block_parsing=parse_config.pdfs_use_block_parsing,
             )
             if not texts:
                 raise ValueError(f"Could not read document {path}. Is it empty?")
@@ -404,6 +391,7 @@ class Docs(BaseModel):
             chunk_chars=parse_config.chunk_size,
             overlap=parse_config.overlap,
             page_size_limit=parse_config.page_size_limit,
+            use_block_parsing=parse_config.pdfs_use_block_parsing,
         )
         # loose check to see if document was loaded
         if (

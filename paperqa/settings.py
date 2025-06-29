@@ -165,6 +165,13 @@ class ParsingSettings(BaseModel):
             " (ignoring chars vs tokens difference)."
         ),
     )
+    pdfs_use_block_parsing: bool = Field(
+        default=False,
+        description=(
+            "Opt-in flag to use block-based parsing for PDFs instead of"
+            " text-based parsing, which is known to be better for some PDFs."
+        ),
+    )
     use_doc_details: bool = Field(
         default=True, description="Whether to try to get metadata details for a Doc."
     )
@@ -428,6 +435,14 @@ class IndexSettings(BaseModel):
             "Whether to sync the index with the paper directory when loading an index."
             " Setting to True will add or delete index files to match the source paper"
             " directory."
+        ),
+    )
+    files_filter: Callable[[anyio.Path | pathlib.Path], bool] = Field(
+        default=lambda f: f.suffix in {".txt", ".pdf", ".html", ".md"},
+        exclude=True,
+        description=(
+            "Filter function to apply to files in the paper directory."
+            " When the function returns True, the file will be indexed."
         ),
     )
 

@@ -48,7 +48,7 @@ from paperqa.settings import IndexSettings, get_settings
 from paperqa.types import VAR_MATCH_LOOKUP, DocDetails
 from paperqa.utils import ImpossibleParsingError, hexdigest
 
-from .models import SupportsPickle
+from .models import JSONType, SupportsPickle
 
 if TYPE_CHECKING:
     from tantivy import IndexWriter
@@ -101,7 +101,9 @@ class SearchDocumentStorage(StrEnum):
             return zlib.compress(pickle.dumps(data))
         return pickle.dumps(data)
 
-    def read_from_string(self, data: str | bytes) -> BaseModel | SupportsPickle:
+    def read_from_string(
+        self, data: str | bytes
+    ) -> BaseModel | SupportsPickle | JSONType:
         if self == SearchDocumentStorage.JSON_MODEL_DUMP:
             return json.loads(data)
         if self == SearchDocumentStorage.PICKLE_COMPRESSED:
@@ -258,9 +260,15 @@ class SearchIndex:
             if await file_index_path.exists():
                 async with await anyio.open_file(file_index_path, "rb") as f:
                     content = await f.read()
-                    self._index_files = pickle.loads(  # noqa: S301
-                        zlib.decompress(content)
-                    )
+                    try:
+                        self._index_files = pickle.loads(  # noqa: S301
+                            zlib.decompress(content)
+                        )
+                    except Exception:
+                        logger.exception(
+                            f"Failed to load index file {file_index_path}."
+                        )
+                        raise
         return self._index_files
 
     @staticmethod
@@ -685,7 +693,7 @@ async def get_directory_index(  # noqa: PLR0912
             if index_settings.recurse_subdirectories
             else paper_directory.iterdir()
         )
-        if file.suffix in {".txt", ".pdf", ".html", ".md"}
+        if index_settings.files_filter(file)
     ]
     if len(valid_papers_rel_file_paths) > WARN_IF_INDEXING_MORE_THAN:
         logger.warning(

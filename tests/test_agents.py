@@ -89,11 +89,11 @@ async def test_get_directory_index(
             "year",
         ], "Incorrect fields in index"
         assert not index.changed, "Expected index to not have changes at this point"
-        # bates.txt + empty.txt + flag_day.html + gravity_hill.md + obama.txt + paper.pdf,
+        # bates.txt + empty.txt + flag_day.html + gravity_hill.md + obama.txt + paper.pdf + pasa.pdf,
         # but empty.txt fails to be added
         path_to_id = await index.index_files
         assert (
-            sum(id_ != FAILED_DOCUMENT_ADD_ID for id_ in path_to_id.values()) == 5
+            sum(id_ != FAILED_DOCUMENT_ADD_ID for id_ in path_to_id.values()) == 6
         ), "Incorrect number of parsed index files"
 
         with subtests.test(msg="check-txt-query"):
@@ -138,11 +138,20 @@ async def test_get_directory_index(
         # Now we actually remove (but not add!) a file from the paper directory,
         # and we still don't reprocess files
         (paper_dir / "obama.txt").unlink()
-        with patch.object(
-            Docs, "aadd", autospec=True, side_effect=Docs.aadd
-        ) as mock_aadd:
+        with (
+            patch.object(
+                Docs, "aadd", autospec=True, side_effect=Docs.aadd
+            ) as mock_aadd,
+            patch.object(
+                agent_test_settings.agent.index,
+                "files_filter",
+                lambda f: f.suffix in {".txt", ".pdf", ".md"},  # Also, exclude HTML
+            ),
+        ):
             index = await get_directory_index(settings=agent_test_settings)
-        assert len(await index.index_files) == len(path_to_id) - 1
+        # Subtract 1 for the removed obama.txt file,
+        # and another 1 for the filtered out flag_day.html
+        assert len(await index.index_files) == len(path_to_id) - 2
         mock_aadd.assert_not_awaited(), "Expected we didn't re-add files"
 
         # Note let's delete files.zip, and confirm we can't load the index
@@ -159,7 +168,8 @@ async def test_resuming_crashed_index_build(agent_test_settings: Settings) -> No
         [
             x
             for x in cast("Path", index_settings.paper_directory).iterdir()
-            if x.suffix != ".csv"
+            # Filter out .csv and .DS_Store files
+            if x.suffix != ".csv" and agent_test_settings.agent.index.files_filter(x)
         ]
     )
     assert (
@@ -238,6 +248,7 @@ EXPECTED_STUB_DATA_FILES = {
     "gravity_hill.md",
     "obama.txt",
     "paper.pdf",
+    "pasa.pdf",
 }
 
 
@@ -555,6 +566,13 @@ async def test_gather_evidence_rejects_empty_docs(
 async def test_agent_sharing_state(
     agent_test_settings: Settings, subtests: SubTests, callback_type: str | None
 ) -> None:
+    def files_filter(f) -> bool:
+        # Filter out pasa.pdf just to speed the test and save API costs
+        return f.name != "pasa.pdf" and IndexSettings.model_fields[
+            "files_filter"
+        ].default(f)
+
+    agent_test_settings.agent.index.files_filter = files_filter
     agent_test_settings.agent.search_count = 3  # Keep low for speed
     agent_test_settings.answer.evidence_k = 2
     agent_test_settings.answer.answer_max_sources = 1
@@ -1081,7 +1099,8 @@ async def test_index_build_concurrency(agent_test_settings: Settings) -> None:
     )
 
 
-def test_env_from_name(subtests: SubTests) -> None:
+@pytest.mark.asyncio
+async def test_env_from_name(subtests: SubTests) -> None:
     assert "paperqa" in Environment.available()
 
     with subtests.test(msg="only-task"):
@@ -1089,6 +1108,8 @@ def test_env_from_name(subtests: SubTests) -> None:
             "paperqa", "How can you use XAI for chemical property prediction?"
         )
         assert isinstance(env, PaperQAEnvironment)
+        with pytest.raises(ValueError, match="configured"):
+            await env.get_id()
 
     with subtests.test(msg="env-kwargs"):
         env = Environment.from_name(
