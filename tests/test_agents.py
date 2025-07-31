@@ -105,6 +105,14 @@ async def test_get_directory_index(
                 f" {[d.formatted_citation for d in results[0].docs.values()]}."
             )
 
+            # Check single quoted text in the query doesn't crash us
+            results = await index.query(query="Who is 'Bates'")
+            assert results
+
+            # Check possessive in the query doesn't crash us
+            results = await index.query(query="What is Bates' first name")
+            assert results
+
         with subtests.test(msg="check-md-query"):
             results = await index.query(query="what is a gravity hill?", min_score=5)
             assert results
@@ -320,7 +328,7 @@ async def test_get_directory_index_w_no_citations(
 
 @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError", "httpx.RemoteProtocolError"])
 @pytest.mark.parametrize("agent_type", [FAKE_AGENT_TYPE, ToolSelector, SimpleAgent])
-@pytest.mark.parametrize("llm_name", ["gpt-4o", "gemini/gemini-1.5-flash"])
+@pytest.mark.parametrize("llm_name", ["gpt-4o", "gemini/gemini-2.0-flash-lite"])
 @pytest.mark.asyncio
 async def test_agent_types(
     agent_test_settings: Settings,
@@ -960,6 +968,7 @@ def test_answers_are_striped() -> None:
                     ),
                 ),
                 score=3,
+                extra_field="extra_value",
             )
         ],
     )
@@ -969,6 +978,7 @@ def test_answers_are_striped() -> None:
     assert not response.session.contexts[0].text.text
     assert response.session.contexts[0].text.doc is not None
     assert response.session.contexts[0].text.doc.embedding is None
+    assert response.session.contexts[0].extra_field is not None  # type: ignore[attr-defined]
     # make sure it serializes
     response.model_dump_json()
 
@@ -1011,9 +1021,9 @@ async def test_search_pagination(agent_test_settings: Settings) -> None:
 
     page_size = 1
 
-    page1_results = await index.query(query="test", top_n=page_size, offset=0)
+    page1_results = await index.query(query="test", top_n=page_size)
     page2_results = await index.query(query="test", top_n=page_size, offset=page_size)
-    page1and2_results = await index.query(query="test", top_n=2 * page_size, offset=0)
+    page1and2_results = await index.query(query="test", top_n=2 * page_size)
 
     assert (
         page1_results == page1and2_results[:page_size]

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 import shutil
 from collections.abc import Iterator
@@ -31,15 +30,17 @@ def _load_env() -> None:
     load_dotenv()
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(autouse=True, scope="session")
 def _setup_default_logs() -> None:
     # Lazily import from paperqa so typeguard doesn't throw:
     # > /path/to/.venv/lib/python3.12/site-packages/typeguard/_pytest_plugin.py:93:
     # > InstrumentationWarning: typeguard cannot check these packages because they
     # > are already imported: paperqa
+    from paperqa.settings import ParsingSettings
     from paperqa.utils import setup_default_logs
 
     setup_default_logs()
+    ParsingSettings.model_fields["configure_pdf_parser"].default()
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -63,23 +64,25 @@ def fixture_vcr_config() -> dict[str, Any]:
     }
 
 
-@pytest.fixture
-def tmp_path_cleanup(tmp_path: Path) -> Iterator[Path]:
+@pytest.fixture(name="tmp_path_cleanup")
+def fixture_tmp_path_cleanup(tmp_path: Path) -> Iterator[Path]:
     yield tmp_path
     # Cleanup after the test
     if tmp_path.exists():
         shutil.rmtree(tmp_path, ignore_errors=True)
 
 
-@pytest.fixture
-def agent_home_dir(tmp_path_cleanup: str | os.PathLike) -> Iterator[str | os.PathLike]:
+@pytest.fixture(name="agent_home_dir")
+def fixture_agent_home_dir(
+    tmp_path_cleanup: str | os.PathLike,
+) -> Iterator[str | os.PathLike]:
     """Set up a unique temporary folder for the agent module."""
     with patch.dict("os.environ", {"PQA_HOME": str(tmp_path_cleanup)}):
         yield tmp_path_cleanup
 
 
-@pytest.fixture
-def agent_index_dir(agent_home_dir: Path) -> Path:
+@pytest.fixture(name="agent_index_dir")
+def fixture_agent_index_dir(agent_home_dir: Path) -> Path:
     return agent_home_dir / ".pqa" / "indexes"
 
 
@@ -134,22 +137,3 @@ def stub_data_dir_w_near_dupes(stub_data_dir: Path, tmp_path: Path) -> Iterator[
 
     if tmp_path.exists():
         shutil.rmtree(tmp_path, ignore_errors=True)
-
-
-@pytest.fixture(name="reset_log_levels")
-def fixture_reset_log_levels(caplog) -> Iterator[None]:
-    logging.getLogger().setLevel(logging.DEBUG)
-
-    for name in logging.root.manager.loggerDict:
-        logger = logging.getLogger(name)
-        logger.setLevel(logging.DEBUG)
-        logger.propagate = True
-
-    caplog.set_level(logging.DEBUG)
-
-    yield
-
-    for name in logging.root.manager.loggerDict:
-        logger = logging.getLogger(name)
-        logger.setLevel(logging.NOTSET)
-        logger.propagate = True

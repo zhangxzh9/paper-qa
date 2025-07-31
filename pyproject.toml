@@ -24,7 +24,6 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "PyMuPDF>=1.24.12",  # For pymupdf.set_messages addition
     "aiohttp>=3.10.6",  # TODO: remove in favor of httpx, pin for aiohttp.ClientConnectionResetError
     "anyio",
     "fhaviary[llm]>=0.20",  # For Environment.get_id
@@ -32,6 +31,7 @@ dependencies = [
     "html2text",  # TODO: evaluate moving to an opt-in dependency
     "httpx",
     "numpy",
+    "paper-qa-pypdf",  # TODO: after https://peps.python.org/pep-0771/, make this opt-out if 'pymupdf' extra is specified`
     "pybtex",
     "pydantic-settings",
     "pydantic~=2.0,>=2.10.1",  # Pin 2.10 for typing breaks
@@ -59,9 +59,9 @@ dev = [
     "fhlmi>=0.28",  # For update_litellm_max_callbacks convenience
     "ipykernel>=6.29",  # For running Jupter notebooks, and pin to keep recent
     "ipython>=8",  # Pin to keep recent
-    "litellm>=1.68",  # Pin for PydanticDeprecatedSince20 fixes
+    "litellm>=1.68,<1.71",  # Lower pin for PydanticDeprecatedSince20 fixes, upper pin for VCR cassette breaks (https://github.com/BerriAI/litellm/issues/11724)
     "mypy>=1.8",  # Pin for mutable-override
-    "paper-qa[ldp,typing,zotero,local,qdrant]",
+    "paper-qa[ldp,pypdf,pymupdf,typing,zotero,local,qdrant]",
     "pre-commit>=3.4",  # Pin to keep recent
     "pydantic~=2.11",  # Pin for start of model_fields deprecation
     "pylint-pydantic",
@@ -87,6 +87,8 @@ local = [
 openreview = [
     "openreview-py",
 ]
+pymupdf = ["paper-qa-pymupdf"]
+pypdf = ["paper-qa-pypdf"]
 qdrant = [
     "qdrant-client",
 ]
@@ -96,6 +98,7 @@ typing = [
     "types-setuptools",
 ]
 zotero = [
+    "paper-qa-pymupdf",
     "pyzotero",
 ]
 
@@ -112,8 +115,13 @@ preview = true
 [tool.codespell]
 check-filenames = true
 check-hidden = true
-ignore-words-list = "aadd,astroid,ser,ECT"
-skip = "docs/2024-10-16_litqa2-splits.json5"
+ignore-words-list = "aadd,astroid,flate,ser,ECT"
+skip = [
+    "docs/2024-10-16_litqa2-splits.json5",
+    "src/paperqa/clients/client_data/*",
+    "tests/cassettes/*",
+    "tests/stub_data/*",
+]
 
 [tool.markdownlint]
 no-inline-html = false
@@ -150,6 +158,11 @@ error_summary = false
 exclude = [
     "^\\.?venv",  # SEE: https://regex101.com/r/0rp5Br/1
 ]
+# Specifies the paths to use, after trying the paths from MYPYPATH environment variable.
+# Useful if you'd like to keep stubs in your repo, along with the config file.
+# Multiple paths are always separated with a : or , regardless of the platform.
+# User home directory and environment variables will be expanded.
+mypy_path = "$MYPY_CONFIG_FILE_DIR/src,$MYPY_CONFIG_FILE_DIR/packages/paper-qa-pypdf/src,$MYPY_CONFIG_FILE_DIR/packages/paper-qa-pymupdf/src"
 # Specifies the OS platform for the target program, for example darwin or win32
 # (meaning OS X or Windows, respectively). The default is the current platform
 # as revealed by Python’s sys.platform variable.
@@ -265,6 +278,7 @@ disable = [
     "unused-argument",  # Rely on ruff ARG002 for this
     "unused-import",  # Rely on ruff F401 for this
     "unused-variable",  # Rely on ruff F841 for this
+    "use-sequence-for-iteration",  # Rely on ruff C0208 for this
     "wrong-import-order",  # Rely on ruff I001 for this
     "wrong-import-position",  # Rely on ruff E402 for this
 ]
@@ -300,7 +314,7 @@ filterwarnings = [
 # files or test ids are given in the command line when executing pytest from the rootdir
 # directory. File system paths may use shell-style wildcards, including the recursive **
 # pattern.
-testpaths = ["tests"]
+testpaths = ["packages", "tests"]
 
 [tool.refurb]
 enable_all = true
@@ -393,9 +407,7 @@ extend-select = [
     "FURB113",
     "FURB116",
     "FURB118",
-    "FURB122",
     "FURB131",
-    "FURB132",
     "FURB140",
     "FURB142",
     "FURB145",
@@ -403,17 +415,13 @@ extend-select = [
     "FURB152",
     "FURB154",
     "FURB156",
-    "FURB157",
-    "FURB162",
     "FURB164",
-    "FURB166",
     "FURB171",
     "FURB180",
     "FURB189",
     "FURB192",
     "LOG004",
-    "LOG014",
-    "PLC0415",
+    "PLC0207",
     "PLC1901",
     "PLC2701",
     "PLC2801",
@@ -427,23 +435,18 @@ extend-select = [
     "PLR0916",
     "PLR0917",
     "PLR1702",
-    "PLR1733",
     "PLR6104",
     "PLR6201",
     "PLR6301",
     "PLW0108",
-    "PLW0177",
     "PLW0244",
     "PLW1514",
     "PLW3201",
-    "PT028",
     "PT029",
-    "PT030",
-    "PT031",
+    "PTH211",
     "PYI059",
     "PYI061",
     "RUF027",
-    "RUF028",
     "RUF029",
     "RUF031",
     "RUF036",
@@ -453,22 +456,17 @@ extend-select = [
     "RUF043",
     "RUF045",
     "RUF047",
-    "RUF049",
     "RUF052",
-    "RUF053",
     "RUF054",
     "RUF055",
     "RUF056",
-    "RUF057",
-    "RUF058",
     "RUF059",
+    "RUF060",
+    "RUF061",
     "RUF102",
     "TC008",
     "UP042",
-    "UP045",
-    "UP046",
-    "UP047",
-    "UP049",
+    "UP050",
     "W391",
 ]
 # List of rule codes that are unsupported by Ruff, but should be preserved when
@@ -546,6 +544,7 @@ unfixable = [
     "ERA001",  # While debugging, temporarily commenting code can be useful
     "F401",  # While debugging, unused imports can be useful
     "F841",  # While debugging, unused locals can be useful
+    "PIE794",  # Autoremoving the latter of two fields is dangerous
     "RUF059",  # While debugging, unused locals can be useful
     "TC004",  # While debugging, it can be nice to keep TYPE_CHECKING in-tact
 ]
@@ -580,10 +579,10 @@ convention = "google"
 paperqa = ["configs/**json"]
 
 [tool.setuptools.packages.find]
-include = ["paperqa*"]
+where = ["src"]
 
 [tool.setuptools_scm]
-version_file = "paperqa/version.py"
+version_file = "src/paperqa/version.py"
 
 [tool.tomlsort]
 all = true
@@ -598,10 +597,19 @@ extend-ignore-re = ["(?Rm)^.*(#|//)\\s*spellchecker:( )?disable-line$"]
 [tool.typos.default.extend-words]
 ECT = "ECT"  # Filter in clinicaltrials.gov
 aadd = "aadd"
+flate = "flate"  # FlateDecode is a valid PDF compression method
 
 [tool.typos.files]
 extend-exclude = [
-    "paperqa/clients/client_data/journal_quality.csv",
+    "src/paperqa/clients/client_data/journal_quality.csv",
     "tests/cassettes/**",
     "tests/stub_data/**",
 ]
+
+[tool.uv.sources]
+paper-qa = {workspace = true}
+paper-qa-pymupdf = {workspace = true}
+paper-qa-pypdf = {workspace = true}
+
+[tool.uv.workspace]
+members = ["packages/*"]

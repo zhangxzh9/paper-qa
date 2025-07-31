@@ -1,6 +1,6 @@
 # PaperQA2
 
-[![GitHub](https://img.shields.io/badge/github-%23121011.svg?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Future-House/paper-qa)
+[![GitHub](https://img.shields.io/badge/github-%23121011.svg?logo=github&logoColor=white)](https://github.com/Future-House/paper-qa)
 [![PyPI version](https://badge.fury.io/py/paper-qa.svg)](https://badge.fury.io/py/paper-qa)
 [![tests](https://github.com/Future-House/paper-qa/actions/workflows/tests.yml/badge.svg)](https://github.com/Future-House/paper-qa)
 ![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)
@@ -122,7 +122,6 @@ Here are some in no particular order:
 5. [tantivy](https://github.com/quickwit-oss/tantivy)
 6. [LiteLLM][LiteLLM general docs]
 7. [pybtex](https://pybtex.org/)
-8. [PyMuPDF](https://pymupdf.readthedocs.io/en/latest/)
 
 ### PaperQA2 vs PaperQA
 
@@ -760,7 +759,8 @@ The paper directory is not modified in any way, it's just read from.
 The indexing process attempts to infer paper metadata like title and DOI
 using LLM-powered text processing.
 You can avoid this point of uncertainty using a "manifest" file,
-which is a CSV containing three columns (order doesn't matter):
+which is a CSV containing `DocDetails` fields (order doesn't matter).
+For example:
 
 - `file_location`: relative path to the paper's PDF within the index directory
 - `doi`: DOI of the paper
@@ -768,6 +768,9 @@ which is a CSV containing three columns (order doesn't matter):
 
 By providing this information,
 we ensure queries to metadata providers like Crossref are accurate.
+
+To ease creating a manifest, there is a helper class method `Doc.to_csv`,
+which also works when called on `DocDetails`.
 
 ### Reusing Index
 
@@ -882,12 +885,17 @@ will return much faster than the first query and we'll be certain the authors ma
 | `answer.max_concurrent_requests`             | `4`                                    | Max concurrent requests to LLMs.                                                                        |
 | `answer.answer_filter_extra_background`      | `False`                                | Whether to cite background info from model.                                                             |
 | `answer.get_evidence_if_no_contexts`         | `True`                                 | Allow lazy evidence gathering.                                                                          |
+| `answer.group_contexts_by_question`          | `False`                                | Groups the final contexts by the underlying `gather_evidence` question in the final context prompt.     |
+| `answer.evidence_relevance_score_cutoff`     | `1`                                    | Cutoff evidence relevance score to include in the answer context (inclusive)                            |
+| `answer.skip_evidence_citation_strip`        | `False`                                | Skip removal of citations from the `gather_evidence` contexts                                           |
 | `parsing.chunk_size`                         | `5000`                                 | Characters per chunk (0 for no chunking).                                                               |
 | `parsing.page_size_limit`                    | `1,280,000`                            | Character limit per page.                                                                               |
 | `parsing.pdfs_use_block_parsing`             | `False`                                | Opt-in flag for block-based PDF parsing over text-based PDF parsing.                                    |
 | `parsing.use_doc_details`                    | `True`                                 | Whether to get metadata details for docs.                                                               |
 | `parsing.overlap`                            | `250`                                  | Characters to overlap chunks.                                                                           |
 | `parsing.defer_embedding`                    | `False`                                | Whether to defer embedding until summarization.                                                         |
+| `parsing.parse_pdf`                          | `paperqa_pypdf.parse_pdf_to_pages`     | Function to parse PDF files.                                                                            |
+| `parsing.configure_pdf_parser`               | No-op                                  | Callable to configure the PDF parser within `parse_pdf`, useful for behaviors such as enabling logging. |
 | `parsing.chunking_algorithm`                 | `ChunkingOptions.SIMPLE_OVERLAP`       | Algorithm for chunking.                                                                                 |
 | `parsing.doc_filters`                        | `None`                                 | Optional filters for allowed documents.                                                                 |
 | `parsing.use_human_readable_clinical_trials` | `False`                                | Parse clinical trial JSONs into readable text.                                                          |
@@ -968,7 +976,7 @@ from paperqa import Docs, Settings
 my_qa_prompt = (
     "Answer the question '{question}'\n"
     "Use the context below if helpful. "
-    "You can cite the context using the key like (Example2012). "
+    "You can cite the context using the key like (pqac-abcd1234). "
     "If there is insufficient context, write a poem "
     "about how you cannot answer.\n\n"
     "Context: {context}"
