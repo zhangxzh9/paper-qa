@@ -1,6 +1,8 @@
 # PaperQA2
 
-[![GitHub](https://img.shields.io/badge/github-%23121011.svg?logo=github&logoColor=white)](https://github.com/Future-House/paper-qa)
+<!-- pyml disable-num-lines 6 line-length -->
+
+[![GitHub](https://img.shields.io/badge/GitHub-black?logo=github&logoColor=white)](https://github.com/Future-House/paper-qa)
 [![PyPI version](https://badge.fury.io/py/paper-qa.svg)](https://badge.fury.io/py/paper-qa)
 [![tests](https://github.com/Future-House/paper-qa/actions/workflows/tests.yml/badge.svg)](https://github.com/Future-House/paper-qa)
 ![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)
@@ -35,6 +37,7 @@ question answering, summarization, and contradiction detection.
     - [Local Embedding Models (Sentence Transformers)](#local-embedding-models-sentence-transformers)
   - [Adjusting number of sources](#adjusting-number-of-sources)
   - [Using Code or HTML](#using-code-or-html)
+  - [Multimodal Support](#multimodal-support)
   - [Using External DB/Vector DB and Caching](#using-external-dbvector-db-and-caching)
   - [Creating Index](#creating-index)
     - [Manifest Files](#manifest-files)
@@ -287,7 +290,7 @@ pqa --settings <setting name> \
 
 ### Bundled Settings
 
-Inside [`paperqa/configs`](paperqa/configs) we bundle known useful settings:
+Inside [`src/paperqa/configs`](src/paperqa/configs) we bundle known useful settings:
 
 | Setting Name | Description                                                                                                                  |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------- |
@@ -307,7 +310,7 @@ For each OpenAI tier, a pre-built setting exists to limit usage.
 pqa --settings 'tier1_limits' ask 'What is PaperQA2?'
 ```
 
-This will limit your system to use the [tier1_limits](paperqa/configs/tier1_limits.json),
+This will limit your system to use the [tier1_limits](src/paperqa/configs/tier1_limits.json),
 and slow down your queries to accommodate.
 
 You can also specify them manually with any rate limit string that matches the specification in
@@ -726,6 +729,28 @@ session = await docs.aquery("Where is the search bar in the header defined?")
 print(session)
 ```
 
+### Multimodal Support
+
+Multimodal support centers on:
+
+- Standalone images
+- Images or tables in PDFs
+
+The `Docs` object stores media via a `ParsedMedia` object.
+When chunking a document, media are not split at chunk boundaries,
+so it's possible 2+ chunks can correspond with the same media.
+This means within PaperQA each chunk
+has a one-to-many relationship between `ParsedMedia` and chunks.
+
+Depending on the source document, the same image can appear multiple times
+(e.g. each page of a PDF has a logo in the margins).
+Thus, clients should consider media databases
+to have a many-to-many relationship with chunks.
+
+When creating contextual summaries on a given chunk (a `Text`),
+the summary LLM is passed both the chunk's text and the chunk's associated media,
+but the output contextual summary itself remains text-only.
+
 ### Using External DB/Vector DB and Caching
 
 You may want to cache parsed texts and embeddings in an external database or file.
@@ -819,7 +844,7 @@ Here's a short demo of how to do this:
 ```python
 from paperqa.clients import DocMetadataClient, ALL_CLIENTS
 
-client = DocMetadataClient(clients=ALL_CLIENTS)
+client = DocMetadataClient(metadata_clients=ALL_CLIENTS)
 details = await client.query(title="Augmenting language models with chemistry tools")
 
 print(details.formatted_citation)
@@ -874,11 +899,13 @@ will return much faster than the first query and we'll be certain the authors ma
 | `batch_size`                                 | `1`                                    | Batch size for calling LLMs.                                                                            |
 | `texts_index_mmr_lambda`                     | `1.0`                                  | Lambda for MMR in text index.                                                                           |
 | `verbosity`                                  | `0`                                    | Integer verbosity level for logging (0-3). 3 = all LLM/Embeddings calls logged.                         |
+| `custom_context_serializer`                  | `None`                                 | Custom async function (see typing for signature) to override the default answer context serialization.  |
 | `answer.evidence_k`                          | `10`                                   | Number of evidence pieces to retrieve.                                                                  |
 | `answer.evidence_detailed_citations`         | `True`                                 | Include detailed citations in summaries.                                                                |
 | `answer.evidence_retrieval`                  | `True`                                 | Use retrieval vs processing all docs.                                                                   |
 | `answer.evidence_summary_length`             | `"about 100 words"`                    | Length of evidence summary.                                                                             |
 | `answer.evidence_skip_summary`               | `False`                                | Whether to skip summarization.                                                                          |
+| `answer.evidence_text_only_fallback`         | `False`                                | Whether to allow context creation to retry without media present.                                       |
 | `answer.answer_max_sources`                  | `5`                                    | Max number of sources for an answer.                                                                    |
 | `answer.max_answer_attempts`                 | `None`                                 | Max attempts to generate an answer.                                                                     |
 | `answer.answer_length`                       | `"about 200 words, but can be longer"` | Length of final answer.                                                                                 |
@@ -893,6 +920,7 @@ will return much faster than the first query and we'll be certain the authors ma
 | `parsing.pdfs_use_block_parsing`             | `False`                                | Opt-in flag for block-based PDF parsing over text-based PDF parsing.                                    |
 | `parsing.use_doc_details`                    | `True`                                 | Whether to get metadata details for docs.                                                               |
 | `parsing.overlap`                            | `250`                                  | Characters to overlap chunks.                                                                           |
+| `parsing.multimodal`                         | `True`                                 | Flag to parse both text and images from applicable documents.                                           |
 | `parsing.defer_embedding`                    | `False`                                | Whether to defer embedding until summarization.                                                         |
 | `parsing.parse_pdf`                          | `paperqa_pypdf.parse_pdf_to_pages`     | Function to parse PDF files.                                                                            |
 | `parsing.configure_pdf_parser`               | No-op                                  | Callable to configure the PDF parser within `parse_pdf`, useful for behaviors such as enabling logging. |

@@ -7,7 +7,6 @@ import re
 import tempfile
 import urllib.request
 import warnings
-from collections import defaultdict
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from io import BytesIO
@@ -27,10 +26,10 @@ from paperqa.llms import (
     NumpyVectorStore,
     VectorStore,
 )
-from paperqa.prompts import CANNOT_ANSWER_PHRASE
+from paperqa.prompts import CANNOT_ANSWER_PHRASE, EMPTY_CONTEXTS
 from paperqa.readers import read_doc
 from paperqa.settings import MaybeSettings, get_settings
-from paperqa.types import Context, Doc, DocDetails, DocKey, PQASession, Text
+from paperqa.types import Doc, DocDetails, DocKey, PQASession, Text
 from paperqa.utils import (
     citation_to_docname,
     get_loop,
@@ -282,6 +281,7 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
                 overlap=parse_config.overlap,
                 page_size_limit=parse_config.page_size_limit,
                 use_block_parsing=parse_config.pdfs_use_block_parsing,
+                parse_images=parse_config.multimodal,
                 parse_pdf=parse_config.parse_pdf,
             )
             if not texts or not texts[0].text.strip():
@@ -356,8 +356,8 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
                 metadata_client = kwargs["metadata_client"]
             else:
                 metadata_client = DocMetadataClient(
-                    session=kwargs.pop("session", None),
-                    clients=kwargs.pop("clients", DEFAULT_CLIENTS),
+                    http_client=kwargs.pop("http_client", None),
+                    metadata_clients=kwargs.pop("clients", DEFAULT_CLIENTS),
                 )
 
             query_kwargs: dict[str, Any] = {}
@@ -381,17 +381,19 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
                 doc, **(query_kwargs | kwargs)
             )
 
-        texts = await read_doc(
+        texts, metadata = await read_doc(
             path,
             doc,
             chunk_chars=parse_config.chunk_size,
             overlap=parse_config.overlap,
             page_size_limit=parse_config.page_size_limit,
             use_block_parsing=parse_config.pdfs_use_block_parsing,
+            parse_images=parse_config.multimodal,
             parse_pdf=parse_config.parse_pdf,
+            include_metadata=True,
         )
         # loose check to see if document was loaded
-        if (
+        if metadata.parse_type != "image" and (
             not texts
             or len(texts[0].text) < 10  # noqa: PLR2004
             or (
@@ -670,6 +672,7 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
                         parser=llm_parse_json if prompt_config.use_json else None,
                         callbacks=callbacks,
                         skip_citation_strip=answer_config.skip_evidence_citation_strip,
+                        evidence_text_only_fallback=answer_config.evidence_text_only_fallback,
                     )
                     for m in matches
                 ],
@@ -710,7 +713,7 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
             )
         )
 
-    async def aquery(  # noqa: PLR0912
+    async def aquery(
         self,
         query: PQASession | str,
         settings: MaybeSettings = None,
@@ -765,77 +768,16 @@ class Docs(BaseModel):  # noqa: PLW1641  # TODO: add __hash__
             session.add_tokens(pre)
             pre_str = pre.text
 
-        # sort by first score, then name
-        filtered_contexts = sorted(
-            contexts,
-            key=lambda x: (-x.score, x.text.name),
-        )[: answer_config.answer_max_sources]
-        # remove any contexts with a score below the cutoff
-        filtered_contexts = [
-            c
-            for c in filtered_contexts
-            if c.score >= answer_config.evidence_relevance_score_cutoff
-        ]
-
-        # shim deprecated flag
-        # TODO: remove in v6
-        context_inner_prompt = prompt_config.context_inner
-        if (
-            not answer_config.evidence_detailed_citations
-            and "\nFrom {citation}" in context_inner_prompt
-        ):
-            # Only keep "\nFrom {citation}" if we are showing detailed citations
-            context_inner_prompt = context_inner_prompt.replace("\nFrom {citation}", "")
-
-        context_str_body = ""
-        if answer_config.group_contexts_by_question:
-            contexts_by_question: dict[str, list[Context]] = defaultdict(list)
-            for c in filtered_contexts:
-                # Fallback to the main session question if not available.
-                # question attribute is optional, so if a user
-                # sets contexts externally, it may not have a question.
-                question = getattr(c, "question", session.question)
-                contexts_by_question[question].append(c)
-
-            context_sections = []
-            for question, contexts_in_group in contexts_by_question.items():
-                inner_strs = [
-                    context_inner_prompt.format(
-                        name=c.id,
-                        text=c.context,
-                        citation=c.text.doc.formatted_citation,
-                        **(c.model_extra or {}),
-                    )
-                    for c in contexts_in_group
-                ]
-                # Create a section with a question heading
-                section_header = f'Contexts related to the question: "{question}"'
-                section = f"{section_header}\n\n" + "\n\n".join(inner_strs)
-                context_sections.append(section)
-            context_str_body = "\n\n----\n\n".join(context_sections)
-        else:
-            inner_context_strs = [
-                context_inner_prompt.format(
-                    name=c.id,
-                    text=c.context,
-                    citation=c.text.doc.formatted_citation,
-                    **(c.model_extra or {}),
-                )
-                for c in filtered_contexts
-            ]
-            context_str_body = "\n\n".join(inner_context_strs)
-
-        if pre_str:
-            context_str_body += f"\n\nExtra background information: {pre_str}"
-
-        context_str = prompt_config.context_outer.format(
-            context_str=context_str_body,
-            valid_keys=", ".join([c.id for c in filtered_contexts]),
+        context_str = await query_settings.context_serializer(
+            contexts=contexts,
+            question=session.question,
+            pre_str=pre_str,
         )
 
-        if len(context_str_body.strip()) < 10:  # noqa: PLR2004
+        if len(context_str.strip()) <= EMPTY_CONTEXTS:
             answer_text = (
-                f"{CANNOT_ANSWER_PHRASE} this question due to insufficient information."
+                f"{CANNOT_ANSWER_PHRASE} this question due to"
+                f" {'having no papers' if not self.docs else 'insufficient information.'}."
             )
             answer_reasoning = None
         else:

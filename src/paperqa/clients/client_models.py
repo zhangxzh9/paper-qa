@@ -5,10 +5,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Collection
 from typing import Any, Generic, TypeVar
 
-import aiohttp
+import httpx
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     ValidationError,
     ValidationInfo,
     field_validator,
@@ -27,12 +28,12 @@ logger = logging.getLogger(__name__)
 class ClientQuery(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    session: aiohttp.ClientSession
+    client: httpx.AsyncClient
 
 
 class TitleAuthorQuery(ClientQuery):
     title: str
-    authors: list[str] = []
+    authors: list[str] = Field(default_factory=list)
     title_similarity_threshold: float = 0.75
     fields: Collection[str] | None = None
 
@@ -88,25 +89,28 @@ ClientQueryType = TypeVar("ClientQueryType", bound=ClientQuery)
 
 
 class MetadataProvider(ABC, Generic[ClientQueryType]):
-    """Provide metadata from a query by any means necessary."""
+    """Provide metadata from a query by any means necessary.
+
+    An example is going from a DOI to full paper metadata using Semantic Scholar.
+    """
 
     async def query(self, query: dict) -> DocDetails | None:
-        return await self._query(self.query_transformer(query))
+        return await self._query(self.query_factory(query))
 
     @abstractmethod
     async def _query(self, query: ClientQueryType) -> DocDetails | None:
-        pass
+        """Run a query against the provider."""
 
     @abstractmethod
-    def query_transformer(self, query: dict) -> ClientQueryType:
-        pass
+    def query_factory(self, query: dict) -> ClientQueryType:
+        """Create a query object from unstructured query data."""
 
 
 class DOIOrTitleBasedProvider(MetadataProvider[DOIQuery | TitleAuthorQuery]):
 
     async def query(self, query: dict) -> DocDetails | None:
         try:
-            client_query = self.query_transformer(query)
+            client_query = self.query_factory(query)
             return await self._query(client_query)
         # We allow graceful failures, i.e. return "None" for both DOI errors and timeout errors
         # DOINotFoundError means the paper doesn't exist in the source, the timeout is to prevent
@@ -118,7 +122,7 @@ class DOIOrTitleBasedProvider(MetadataProvider[DOIQuery | TitleAuthorQuery]):
                 f" {self.__class__.__name__}."
             )
         # we're suppressing this error to not fail on 403 or 500 errors from providers
-        except aiohttp.ClientError:
+        except httpx.RequestError:
             logger.warning(
                 "Client error for"
                 f" {client_query.doi if isinstance(client_query, DOIQuery) else client_query.title} in"
@@ -150,7 +154,7 @@ class DOIOrTitleBasedProvider(MetadataProvider[DOIQuery | TitleAuthorQuery]):
             TimeoutError: When the request takes too long on the client side
         """
 
-    def query_transformer(self, query: dict) -> DOIQuery | TitleAuthorQuery:
+    def query_factory(self, query: dict) -> DOIQuery | TitleAuthorQuery:
         try:
             if "doi" in query:
                 return DOIQuery(**query)
@@ -169,7 +173,6 @@ class MetadataPostProcessor(ABC, Generic[ClientQueryType]):
 
     MetadataPostProcessor should be idempotent and not order-dependent, i.e.
     all MetadataPostProcessor instances should be able to run in parallel.
-
     """
 
     async def process(self, doc_details: DocDetails, **kwargs) -> DocDetails:

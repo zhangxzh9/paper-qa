@@ -5,9 +5,9 @@ import logging
 from collections.abc import Awaitable, Collection, Coroutine, Sequence
 from typing import Any, cast
 
-import aiohttp
+import httpx
 from lmi.utils import gather_with_concurrency
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from paperqa.types import Doc, DocDetails
 
@@ -36,23 +36,35 @@ ALL_CLIENTS: Collection[type[MetadataPostProcessor | MetadataProvider]] = {
 
 
 class DocMetadataTask(BaseModel):
-    """Holder for provider and processor tasks."""
+    """Simple container pairing metadata providers with processors."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    providers: Collection[MetadataProvider]
-    processors: Collection[MetadataPostProcessor]
+    providers: Collection[MetadataProvider] = Field(
+        description=(
+            "Metadata providers allotted to this task."
+            " An example would be providers for Crossref and Semantic Scholar."
+        )
+    )
+    processors: Collection[MetadataPostProcessor] = Field(
+        description=(
+            "Metadata post-processors allotted to this task."
+            " An example would be a journal quality filter."
+        )
+    )
 
     def provider_queries(
         self, query: dict
     ) -> list[Coroutine[Any, Any, DocDetails | None]]:
+        """Set up query coroutines for each contained metadata provider."""
         return [p.query(query) for p in self.providers]
 
     def processor_queries(
-        self, doc_details: DocDetails, session: aiohttp.ClientSession
+        self, doc_details: DocDetails, client: httpx.AsyncClient
     ) -> list[Coroutine[Any, Any, DocDetails]]:
+        """Set up process coroutines for each contained metadata post-processor."""
         return [
-            p.process(copy.copy(doc_details), session=session) for p in self.processors
+            p.process(copy.copy(doc_details), client=client) for p in self.processors
         ]
 
     def __repr__(self) -> str:
@@ -64,8 +76,8 @@ class DocMetadataTask(BaseModel):
 class DocMetadataClient:
     def __init__(
         self,
-        session: aiohttp.ClientSession | None = None,
-        clients: (
+        http_client: httpx.AsyncClient | None = None,
+        metadata_clients: (
             Collection[type[MetadataPostProcessor | MetadataProvider]]
             | Sequence[Collection[type[MetadataPostProcessor | MetadataProvider]]]
         ) = DEFAULT_CLIENTS,
@@ -73,21 +85,20 @@ class DocMetadataClient:
         """Metadata client for querying multiple metadata providers and processors.
 
         Args:
-            session: outer scope aiohttp session to allow for connection pooling
-            clients: list of MetadataProvider and MetadataPostProcessor classes to query;
+            http_client: Async HTTP client to allow for connection pooling.
+            metadata_clients: list of MetadataProvider and MetadataPostProcessor classes to query;
                 if nested, will query in order looking for termination criteria after each.
                 Will terminate early if either DocDetails.is_hydration_needed is False OR if
                 all requested fields are present in the DocDetails object.
-
         """
-        self._session = session
+        self._http_client = http_client
         self.tasks: list[DocMetadataTask] = []
 
         # first see if we are nested; i.e. we want order
-        if isinstance(clients, Sequence) and all(
-            isinstance(sub_clients, Collection) for sub_clients in clients
+        if isinstance(metadata_clients, Sequence) and all(
+            isinstance(sub_clients, Collection) for sub_clients in metadata_clients
         ):
-            for sub_clients in clients:
+            for sub_clients in metadata_clients:
                 self.tasks.append(
                     DocMetadataTask(
                         providers=[
@@ -108,18 +119,20 @@ class DocMetadataClient:
                     )
                 )
         # otherwise, we are a flat collection
-        if not self.tasks and all(not isinstance(c, Collection) for c in clients):
+        if not self.tasks and all(
+            not isinstance(c, Collection) for c in metadata_clients
+        ):
             self.tasks.append(
                 DocMetadataTask(
                     providers=[
                         c if isinstance(c, MetadataProvider) else c()  # type: ignore[redundant-expr]
-                        for c in clients
+                        for c in metadata_clients
                         if (isinstance(c, type) and issubclass(c, MetadataProvider))
                         or isinstance(c, MetadataProvider)
                     ],
                     processors=[
                         c if isinstance(c, MetadataPostProcessor) else c()  # type: ignore[redundant-expr]
-                        for c in clients
+                        for c in metadata_clients
                         if (
                             isinstance(c, type) and issubclass(c, MetadataPostProcessor)
                         )
@@ -133,9 +146,13 @@ class DocMetadataClient:
 
     async def query(self, **kwargs) -> DocDetails | None:
 
-        session = aiohttp.ClientSession() if self._session is None else self._session
+        client = (
+            httpx.AsyncClient(timeout=10.0)
+            if self._http_client is None
+            else self._http_client
+        )
 
-        query_args = kwargs if "session" in kwargs else kwargs | {"session": session}
+        query_args = kwargs if "client" in kwargs else kwargs | {"client": client}
 
         all_doc_details: DocDetails | None = None
 
@@ -164,7 +181,7 @@ class DocMetadataClient:
                     sum(
                         await gather_with_concurrency(
                             len(task.processors),
-                            task.processor_queries(doc_details, session),
+                            task.processor_queries(doc_details, client),
                         )
                     )
                     or None
@@ -183,8 +200,8 @@ class DocMetadataClient:
                     )
                     break
 
-        if self._session is None:
-            await session.close()
+        if self._http_client is None:
+            await client.aclose()
 
         return all_doc_details
 

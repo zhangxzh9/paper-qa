@@ -3,10 +3,20 @@ import importlib.resources
 import os
 import pathlib
 import warnings
+from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
 from pydoc import locate
-from typing import Any, ClassVar, Self, TypeAlias, assert_never, cast
+from typing import (
+    Any,
+    ClassVar,
+    Protocol,
+    Self,
+    TypeAlias,
+    assert_never,
+    cast,
+    runtime_checkable,
+)
 
 import anyio
 from aviary.core import Tool, ToolSelector
@@ -27,6 +37,7 @@ from pydantic import (
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, CliSettingsSource, SettingsConfigDict
 
+import paperqa.configs
 from paperqa._ldp_shims import (
     HAS_LDP_INSTALLED,
     Agent,
@@ -55,6 +66,7 @@ from paperqa.prompts import (
     summary_prompt,
 )
 from paperqa.readers import PDFParserFn
+from paperqa.types import Context
 from paperqa.utils import hexdigest, pqa_directory
 from paperqa.version import __version__
 
@@ -63,8 +75,21 @@ from paperqa.version import __version__
 _EnvironmentState: TypeAlias = Any
 
 
+@runtime_checkable
+class AsyncContextSerializer(Protocol):
+    """Protocol for generating a context string from settings and context."""
+
+    async def __call__(
+        self,
+        settings: "Settings",
+        contexts: Sequence[Context],
+        question: str,
+        pre_str: str | None,
+    ) -> str: ...
+
+
 class AnswerSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     evidence_k: int = Field(
         default=10, description="Number of evidence pieces to retrieve."
@@ -91,6 +116,13 @@ class AnswerSettings(BaseModel):
     )
     evidence_skip_summary: bool = Field(
         default=False, description="Whether to summarization."
+    )
+    evidence_text_only_fallback: bool = Field(
+        default=False,
+        description=(
+            "Opt-in flag to allow creating contexts without media (just text),"
+            " if the media is problematic for the LLM provider or network."
+        ),
     )
     answer_max_sources: int = Field(
         default=5, description="Max number of sources to use for an answer."
@@ -223,6 +255,13 @@ class ParsingSettings(BaseModel):
     )
     overlap: int = Field(
         default=250, description="Number of characters to overlap chunks."
+    )
+    multimodal: bool = Field(
+        default=True,
+        description=(
+            "Parse both text and images (if applicable to a given document),"
+            " or disable to parse just text."
+        ),
     )
     citation_prompt: str = Field(
         default=citation_prompt,
@@ -499,7 +538,11 @@ class IndexSettings(BaseModel):
         ),
     )
     files_filter: Callable[[anyio.Path | pathlib.Path], bool] = Field(
-        default=lambda f: f.suffix in {".txt", ".pdf", ".html", ".md"},
+        default=lambda f: (
+            f.suffix
+            # TODO: add images after embeddings are supported
+            in {".txt", ".pdf", ".html", ".md"}
+        ),
         exclude=True,
         description=(
             "Filter function to apply to files in the paper directory."
@@ -791,6 +834,14 @@ class Settings(BaseSettings):
         exclude=True,
         frozen=True,
     )
+    custom_context_serializer: AsyncContextSerializer | None = Field(
+        default=None,
+        description=(
+            "Function to turn settings and contexts into an answer context str."
+            " If not populated, the default context serializer will be used."
+        ),
+        exclude=True,
+    )
 
     @model_validator(mode="after")
     def _deprecated_field(self) -> Self:
@@ -877,24 +928,25 @@ class Settings(BaseSettings):
                 )
             return Settings(_cli_settings_source=cli_source(args=True))
 
-        # First, try to find the config file in the user's .config directory
         user_config_path = pqa_directory("settings") / f"{config_name}.json"
-
-        if user_config_path.exists():
-            json_path = user_config_path
-
-        # If not found, fall back to the package's default config
-        try:
+        pkg_config_path = (
             # Use importlib.resources.files() which is recommended for Python 3.9+
-            pkg_config_path = (
-                importlib.resources.files("paperqa.configs") / f"{config_name}.json"
-            )
-            if pkg_config_path.is_file():
-                json_path = cast("pathlib.Path", pkg_config_path)
-        except FileNotFoundError as e:
-            raise FileNotFoundError(
-                f"No configuration file found for {config_name}"
-            ) from e
+            importlib.resources.files(paperqa.configs)
+            / f"{config_name}.json"
+        )
+        if user_config_path.exists():
+            # First, try to find the config file in the user's .config directory
+            json_path = user_config_path
+        else:
+            # If not found, fall back to the package's default config
+            try:
+                if pkg_config_path.is_file():
+                    json_path = cast("pathlib.Path", pkg_config_path)
+            except FileNotFoundError as e:
+                raise FileNotFoundError(
+                    f"No configuration file {config_name!r} found at user config path"
+                    f" {user_config_path} or bundled config path {pkg_config_path}."
+                ) from e
 
         if json_path:
             # we do the ole switcheroo
@@ -906,8 +958,10 @@ class Settings(BaseSettings):
                 **(tmp.model_dump()),
                 _cli_settings_source=cli_source(args=True) if cli_source else None,
             )
-
-        raise FileNotFoundError(f"No configuration file found for {config_name}")
+        raise FileNotFoundError(
+            f"No configuration file {config_name!r} found at user config path"
+            f" {user_config_path} or bundled config path {pkg_config_path}."
+        )
 
     def get_llm(self) -> LiteLLMModel:
         return LiteLLMModel(
@@ -990,7 +1044,14 @@ class Settings(BaseSettings):
                             ]
                         )
                     )
-                config["memory_model"] = UIndexMemoryModel(**config["memory_model"])
+                try:
+                    config["memory_model"] = UIndexMemoryModel(**config["memory_model"])
+                except ImportError as exc:
+                    raise ImportError(
+                        "Memory agents require the 'usearch' package,"
+                        " which is part of the 'memory' extra."
+                        " Please: `pip install paper-qa[memory]`."
+                    ) from exc
                 memories = _Memories.validate_python(config.pop("memories"))
                 await asyncio.gather(
                     *(
@@ -1025,6 +1086,88 @@ class Settings(BaseSettings):
         # in February 2025 (https://github.com/BerriAI/litellm/issues/7634), but then
         # Gemini fixed this server-side by mid-April 2025,
         # so this method is now just available for use
+
+    async def context_serializer(
+        self, contexts: Sequence[Context], question: str, pre_str: str | None
+    ) -> str:
+        """Default function for sorting ranked contexts and inserting into a context string."""
+        if self.custom_context_serializer:
+            return await self.custom_context_serializer(
+                settings=self, contexts=contexts, question=question, pre_str=pre_str
+            )
+
+        answer_config = self.answer
+        prompt_config = self.prompts
+
+        # sort by first score, then name
+        filtered_contexts = sorted(
+            contexts,
+            key=lambda x: (-x.score, x.text.name),
+        )[: answer_config.answer_max_sources]
+        # remove any contexts with a score below the cutoff
+        filtered_contexts = [
+            c
+            for c in filtered_contexts
+            if c.score >= answer_config.evidence_relevance_score_cutoff
+        ]
+
+        # shim deprecated flag
+        # TODO: remove in v6
+        context_inner_prompt = prompt_config.context_inner
+        if (
+            not answer_config.evidence_detailed_citations
+            and "\nFrom {citation}" in context_inner_prompt
+        ):
+            # Only keep "\nFrom {citation}" if we are showing detailed citations
+            context_inner_prompt = context_inner_prompt.replace("\nFrom {citation}", "")
+
+        context_str_body = ""
+        if answer_config.group_contexts_by_question:
+            contexts_by_question: dict[str, list[Context]] = defaultdict(list)
+            for c in filtered_contexts:
+                # Fallback to the main session question if not available.
+                # question attribute is optional, so if a user
+                # sets contexts externally, it may not have a question.
+                context_question = getattr(c, "question", question)
+                contexts_by_question[context_question].append(c)
+
+            context_sections = []
+            for context_question, contexts_in_group in contexts_by_question.items():
+                inner_strs = [
+                    context_inner_prompt.format(
+                        name=c.id,
+                        text=c.context,
+                        citation=c.text.doc.formatted_citation,
+                        **(c.model_extra or {}),
+                    )
+                    for c in contexts_in_group
+                ]
+                # Create a section with a question heading
+                section_header = (
+                    f'Contexts related to the question: "{context_question}"'
+                )
+                section = f"{section_header}\n\n" + "\n\n".join(inner_strs)
+                context_sections.append(section)
+            context_str_body = "\n\n----\n\n".join(context_sections)
+        else:
+            inner_context_strs = [
+                context_inner_prompt.format(
+                    name=c.id,
+                    text=c.context,
+                    citation=c.text.doc.formatted_citation,
+                    **(c.model_extra or {}),
+                )
+                for c in filtered_contexts
+            ]
+            context_str_body = "\n\n".join(inner_context_strs)
+
+        if pre_str:
+            context_str_body += f"\n\nExtra background information: {pre_str}"
+
+        return prompt_config.context_outer.format(
+            context_str=context_str_body,
+            valid_keys=", ".join([c.id for c in filtered_contexts]),
+        )
 
 
 # Settings: already Settings

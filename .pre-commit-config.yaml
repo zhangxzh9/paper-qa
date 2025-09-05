@@ -23,7 +23,7 @@ repos:
       - id: mixed-line-ending
       - id: trailing-whitespace
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.12.2
+    rev: v0.12.8
     hooks:
       - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]
@@ -54,11 +54,11 @@ repos:
     hooks:
       - id: check-mailmap
   - repo: https://github.com/henryiii/validate-pyproject-schema-store
-    rev: 2025.06.23
+    rev: 2025.08.07
     hooks:
       - id: validate-pyproject
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.7.19
+    rev: 0.8.6
     hooks:
       - id: uv-lock
   - repo: https://github.com/adamchainz/blacken-docs
@@ -71,11 +71,10 @@ repos:
     hooks:
       - id: nb-clean
         args: [--preserve-cell-outputs, --remove-empty-cells]
-  - repo: https://github.com/igorshubovych/markdownlint-cli
-    rev: v0.45.0
+  - repo: https://github.com/jackdewinter/pymarkdown
+    rev: v0.9.31
     hooks:
-      - id: markdownlint
-        args: [--config=pyproject.toml, --configPointer=/tool/markdownlint]
+      - id: pymarkdown
         exclude: docs/tutorials/
   - repo: https://github.com/mwouts/jupytext
     rev: v1.17.2
@@ -88,30 +87,10 @@ repos:
     rev: 0.0.10
     hooks:
       - id: markdown-toc-creator
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.16.1
+  - repo: local # Use local so we can inspect paperqa.version
     hooks:
       - id: mypy
-        args: [--pretty, --ignore-missing-imports]
-        additional_dependencies:
-          - aiohttp>=3.10.6 # Match pyproject.toml
-          - PyMuPDF>=1.24.12
-          - anyio
-          - fhlmi>=0.28 # Match pyproject.toml
-          - fhaviary[llm]>=0.20 # Match pyproject.toml
-          - ldp>=0.25.0 # Match pyproject.toml
-          - html2text
-          - httpx
-          - pybtex
-          - numpy
-          - pydantic~=2.11 # Match pyproject.toml
-          - pydantic-settings
-          - qdrant-client
-          - rich
-          - tantivy>=0.22.2 # Match pyproject.toml
-          - tenacity
-          - tiktoken>=0.4.0 # Match pyproject.toml
-          - types-setuptools
-          - types-PyYAML
-          - sentence-transformers
-          - pyzotero
+        name: mypy
+        entry: mypy
+        language: system
+        types_or: [python, pyi]
