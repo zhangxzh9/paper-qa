@@ -21,6 +21,7 @@ from aviary.core import (
     Environment,
     Tool,
     ToolRequestMessage,
+    ToolResponseMessage,
     ToolsAdapter,
     ToolSelector,
 )
@@ -89,11 +90,11 @@ async def test_get_directory_index(
             "year",
         ], "Incorrect fields in index"
         assert not index.changed, "Expected index to not have changes at this point"
-        # bates.txt + empty.txt + flag_day.html + gravity_hill.md + obama.txt + paper.pdf + pasa.pdf,
+        # bates.txt + empty.txt + flag_day.html + gravity_hill.md + influence.pdf + obama.txt + paper.pdf + pasa.pdf,
         # but empty.txt fails to be added
         path_to_id = await index.index_files
         assert (
-            sum(id_ != FAILED_DOCUMENT_ADD_ID for id_ in path_to_id.values()) == 6
+            sum(id_ != FAILED_DOCUMENT_ADD_ID for id_ in path_to_id.values()) == 7
         ), "Incorrect number of parsed index files"
 
         with subtests.test(msg="check-txt-query"):
@@ -254,6 +255,7 @@ EXPECTED_STUB_DATA_FILES = {
     "empty.txt",
     "flag_day.html",
     "gravity_hill.md",
+    "influence.pdf",
     "obama.txt",
     "paper.pdf",
     "pasa.pdf",
@@ -466,17 +468,30 @@ async def test_successful_memory_agent(agent_test_settings: Settings) -> None:
 @pytest.mark.asyncio
 async def test_timeout(agent_test_settings: Settings, agent_type: str | type) -> None:
     agent_test_settings.prompts.pre = None
-    agent_test_settings.agent.timeout = 0.001
+    agent_test_settings.agent.timeout = 0.05  # Give time for Environment.reset()
     agent_test_settings.llm = "gpt-4o-mini"
     agent_test_settings.agent.tool_names = {"gen_answer", "complete"}
-    response = await agent_query(
-        query="Are COVID-19 vaccines effective?",
-        settings=agent_test_settings,
-        agent_type=agent_type,
-    )
-    # ensure that GenerateAnswerTool was called
+    orig_exec_tool_calls = PaperQAEnvironment.exec_tool_calls
+    tool_responses: list[list[ToolResponseMessage]] = []
+
+    async def spy_exec_tool_calls(*args, **kwargs) -> list[ToolResponseMessage]:
+        responses = await orig_exec_tool_calls(*args, **kwargs)
+        tool_responses.append(responses)
+        return responses
+
+    with patch.object(PaperQAEnvironment, "exec_tool_calls", spy_exec_tool_calls):
+        response = await agent_query(
+            query="Are COVID-19 vaccines effective?",
+            settings=agent_test_settings,
+            agent_type=agent_type,
+        )
+    # Ensure that GenerateAnswerTool was called in truncation's failover
     assert response.status == AgentStatus.TRUNCATED, "Agent did not timeout"
     assert CANNOT_ANSWER_PHRASE in response.session.answer
+    (last_response,) = tool_responses[-1]
+    assert (
+        "no papers" in last_response.content
+    ), "Expecting agent to been shown specifics on the failure"
 
 
 @pytest.mark.flaky(reruns=5, only_rerun=["AssertionError"])

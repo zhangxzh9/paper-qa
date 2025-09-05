@@ -10,7 +10,7 @@ from http import HTTPStatus
 from itertools import starmap
 from typing import Any
 
-import aiohttp
+import httpx
 from lmi.utils import SEMANTIC_SCHOLAR_KEY_HEADER
 from tenacity import before_sleep_log, retry, retry_if_exception, stop_after_attempt
 
@@ -123,11 +123,7 @@ async def _s2_get_with_retrying(url: str, **get_kwargs) -> dict[str, Any]:
     return await _get_with_retrying(
         url=url,
         headers=get_kwargs.pop("headers", {}) or semantic_scholar_headers(),
-        timeout=(
-            get_kwargs.pop(
-                "timeout", aiohttp.ClientTimeout(SEMANTIC_SCHOLAR_API_REQUEST_TIMEOUT)
-            )
-        ),
+        timeout=get_kwargs.pop("timeout", SEMANTIC_SCHOLAR_API_REQUEST_TIMEOUT),
         # On 7/21/2025, flaky ClientResponseError was seen with 'citations' traversals on
         # paper ID 3516396ffa1fd32d4327e199d9b97ec67dc0439a with DOI 10.1126/science.2821624
         # > aiohttp.client_exceptions.ClientResponseError: 403, message='Forbidden'
@@ -159,7 +155,7 @@ def s2_authors_match(authors: list[str], data: dict) -> bool:
 
 
 async def parse_s2_to_doc_details(
-    paper_data: dict[str, Any], session: aiohttp.ClientSession
+    paper_data: dict[str, Any], client: httpx.AsyncClient
 ) -> DocDetails:
 
     bibtex_source = BibTeXSource.SELF_GENERATED.value
@@ -180,7 +176,7 @@ async def parse_s2_to_doc_details(
         bibtex := clean_upbibtex(paper_data.get("citationStyles", {}).get("bibtex", ""))
     ):
         try:
-            bibtex = await doi_to_bibtex(doi, session)
+            bibtex = await doi_to_bibtex(doi, client)
             bibtex_source = BibTeXSource.CROSSREF.value
         except DOINotFoundError:
             bibtex = None
@@ -232,9 +228,12 @@ def semantic_scholar_headers() -> dict[str, str]:
     return {}
 
 
+HIGH_TITLE_SIMILARITY_THRESHOLD = 1.0
+
+
 async def s2_title_search(
     title: str,
-    session: aiohttp.ClientSession,
+    client: httpx.AsyncClient,
     authors: list[str] | None = None,
     title_similarity_threshold: float = 0.75,
     fields: str = SEMANTIC_SCHOLAR_API_FIELDS,
@@ -249,33 +248,42 @@ async def s2_title_search(
     data = await _s2_get_with_retrying(
         url=endpoint,
         params=params,
-        session=session,
+        client=client,
         http_exception_mappings={
             HTTPStatus.NOT_FOUND: DOINotFoundError(f"Could not find DOI for {title}.")
         },
     )
+
+    # In case we matched >1, sort by similarity of title
     try:
-        if authors and not s2_authors_match(authors, data=data["data"][0]):
-            raise DOINotFoundError(
-                f"Could not find DOI for {title} - author disagreement."
-            )
-    except KeyError as exc:  # Very rare, but "data" may not be in data
+        title_similarity, result = max(
+            # need to check if nested under a 'data' key or not (depends on filtering)
+            (strings_similarity(entry["title"], title), entry)
+            for entry in data.get("data", data)
+        )
+    except (KeyError, IndexError) as exc:
         raise DOINotFoundError(
             f"Unexpected Semantic Scholar search/match endpoint shape for {title}"
             f" given data {data}."
         ) from exc
-    # need to check if nested under a 'data' key or not (depends on filtering)
-    if (
-        strings_similarity(
-            data.get("title", "") if "data" not in data else data["data"][0]["title"],
-            title,
-        )
-        < title_similarity_threshold
-    ):
+
+    if authors:
+        if title_similarity < HIGH_TITLE_SIMILARITY_THRESHOLD and not s2_authors_match(
+            authors, data=result
+        ):
+            raise DOINotFoundError(
+                f"Semantic scholar results did not match for {title!r} - author and title disagreement."
+            )
+        if title_similarity < title_similarity_threshold:
+            raise DOINotFoundError(
+                f"Semantic scholar results did not match for {title!r} - title disagreement."
+            )
+    elif title_similarity < HIGH_TITLE_SIMILARITY_THRESHOLD:
         raise DOINotFoundError(
-            f"Semantic scholar results did not match for title {title!r}."
+            f"Semantic scholar results did not match for {title!r} - title disagreement and no authors provided."
         )
-    return await parse_s2_to_doc_details(data, session)
+
+    return await parse_s2_to_doc_details(data, client)
 
 
 @retry(
@@ -285,7 +293,7 @@ async def s2_title_search(
 )
 async def get_s2_doc_details_from_doi(
     doi: str | None,
-    session: aiohttp.ClientSession,
+    client: httpx.AsyncClient,
     fields: Collection[str] | None = None,
 ) -> DocDetails:
     """Get paper details from Semantic Scholar given a DOI."""
@@ -308,18 +316,18 @@ async def get_s2_doc_details_from_doi(
         paper_data=await _s2_get_with_retrying(
             url=f"{SEMANTIC_SCHOLAR_BASE_URL}/graph/v1/paper/DOI:{doi}",
             params={"fields": s2_fields},
-            session=session,
+            client=client,
             http_exception_mappings={
                 HTTPStatus.NOT_FOUND: DOINotFoundError(f"Could not find DOI for {doi}.")
             },
         ),
-        session=session,
+        client=client,
     )
 
 
 async def get_s2_doc_details_from_title(
     title: str | None,
-    session: aiohttp.ClientSession,
+    client: httpx.AsyncClient,
     authors: list[str] | None = None,
     fields: Collection[str] | None = None,
     title_similarity_threshold: float = 0.75,
@@ -346,7 +354,7 @@ async def get_s2_doc_details_from_title(
     return await s2_title_search(
         title,
         authors=authors,
-        session=session,
+        client=client,
         title_similarity_threshold=title_similarity_threshold,
         fields=s2_fields,
     )
@@ -356,12 +364,12 @@ class SemanticScholarProvider(DOIOrTitleBasedProvider):
     async def _query(self, query: TitleAuthorQuery | DOIQuery) -> DocDetails | None:
         if isinstance(query, DOIQuery):
             return await get_s2_doc_details_from_doi(
-                doi=query.doi, session=query.session, fields=query.fields
+                doi=query.doi, client=query.client, fields=query.fields
             )
         return await get_s2_doc_details_from_title(
             title=query.title,
             authors=query.authors,
-            session=query.session,
+            client=query.client,
             title_similarity_threshold=query.title_similarity_threshold,
             fields=query.fields,
         )
